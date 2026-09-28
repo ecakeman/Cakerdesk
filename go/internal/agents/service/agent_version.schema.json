@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cakerdesk.local/schemas/agent_version.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["identity", "model", "tools", "skills", "memory", "context", "runtime", "sandbox", "io", "secrets"],
+  "properties": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display_name", "system_prompt", "language"],
+      "properties": {
+        "display_name": {"type": "string", "minLength": 1},
+        "system_prompt": {"type": "string", "maxLength": 16000},
+        "language": {"type": "string", "minLength": 1}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "base_url_ref", "model_id", "temperature", "max_output_tokens", "context_window"],
+      "properties": {
+        "provider": {"const": "openai_compatible"},
+        "base_url_ref": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "temperature": {"type": "number"},
+        "max_output_tokens": {"type": "integer", "minimum": 1},
+        "context_window": {"type": "integer", "minimum": 1}
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "approval"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "approval": {"enum": ["never", "always"]},
+          "options": {"type": "object"}
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "hash", "entry_allowed"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+          "hash": {"type": "string", "minLength": 1},
+          "entry_allowed": {"type": "boolean"}
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "agent"],
+      "properties": {
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "auto_extract", "max_entries", "digest_tokens"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "auto_extract": {"type": "boolean"},
+            "max_entries": {"type": "integer", "minimum": 0},
+            "digest_tokens": {"type": "integer", "minimum": 0}
+          }
+        },
+        "agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "inject_top_k", "inject_tokens", "consolidate_after_entries"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "inject_top_k": {"type": "integer", "minimum": 0},
+            "inject_tokens": {"type": "integer", "minimum": 0},
+            "consolidate_after_entries": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compaction_trigger_ratio", "keep_recent_messages", "tool_output_offload_chars"],
+      "properties": {
+        "compaction_trigger_ratio": {"type": "number"},
+        "keep_recent_messages": {"type": "integer"},
+        "tool_output_offload_chars": {"type": "integer", "minimum": 0}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_duration_seconds", "max_model_calls", "max_tool_calls", "max_total_tokens", "recursion_limit", "loop_warn_repeats", "loop_fail_repeats", "max_attempts", "goal"],
+      "properties": {
+        "max_duration_seconds": {"type": "integer", "minimum": 1},
+        "max_model_calls": {"type": "integer", "minimum": 1},
+        "max_tool_calls": {"type": "integer", "minimum": 1},
+        "max_total_tokens": {"type": "integer", "minimum": 1},
+        "recursion_limit": {"type": "integer", "minimum": 1},
+        "loop_warn_repeats": {"type": "integer", "minimum": 1},
+        "loop_fail_repeats": {"type": "integer", "minimum": 1},
+        "max_attempts": {"type": "integer"},
+        "goal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "max_continuations", "no_progress_repeats"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "max_continuations": {"type": "integer"},
+            "no_progress_repeats": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "cpus", "memory_mb", "pids_limit", "exec_timeout_seconds", "max_exec_timeout_seconds"],
+      "properties": {
+        "image": {"type": "string", "minLength": 1},
+        "cpus": {"type": "number", "exclusiveMinimum": 0},
+        "memory_mb": {"type": "integer", "minimum": 1},
+        "pids_limit": {"type": "integer", "minimum": 1},
+        "exec_timeout_seconds": {"type": "integer", "minimum": 1},
+        "max_exec_timeout_seconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "io": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_schema", "output_schema"],
+      "properties": {
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"}
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}
+    }
+  }
+}

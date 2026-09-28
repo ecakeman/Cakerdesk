@@ -1,0 +1,15 @@
+- id: E-auth-login
+  section: "27 P0"
+  test_path: go/internal/integration/p0_test.go
+- id: E-apikey-roundtrip
+  section: "27 P0"
+  test_path: go/internal/integration/p0_test.go
+- id: T-agent-version-rules
+  section: "5.4"
+  test_path: go/internal/agents/service/validate_test.go
+- id: T-routes-perm
+  section: "17.2"
+  test_path: go/internal/httpapi/routes_test.go
+- id: T-rls
+  section: "19.7"
+  test_path: go/internal/integration/p0_test.go
