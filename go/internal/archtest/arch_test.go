@@ -1,54 +1,72 @@
 package archtest
 
 import (
-	"strings"
+	"bytes"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
-
-	"golang.org/x/tools/go/packages"
 )
 
-func TestImports(t *testing.T) {
-	cfg := &packages.Config{Mode: packages.NeedName | packages.NeedImports, Dir: "../.."}
-	pkgs, err := packages.Load(cfg, "cakerdesk/internal/...")
-	if err != nil {
+func TestArchRules(t *testing.T) {
+	pkgs := loadModuleDeps(t)
+	if err := Check(pkgs, DefaultRules()); err != nil {
 		t.Fatal(err)
 	}
-	for _, pkg := range pkgs {
-		if len(pkg.Errors) > 0 {
-			t.Fatal(pkg.Errors)
-		}
-		for path := range pkg.Imports {
-			if strings.Contains(path, "github.com/docker/docker") && !strings.Contains(pkg.PkgPath, "sandboxd") {
-				t.Errorf("%s imports docker client", pkg.PkgPath)
-			}
-			if !strings.Contains(path, "/repo") {
-				continue
-			}
-			if strings.HasSuffix(pkg.PkgPath, "/app") {
-				continue
-			}
-			mod := moduleName(path)
-			if mod == "" {
-				t.Errorf("%s imports %s", pkg.PkgPath, path)
-				continue
-			}
-			own := "/internal/" + mod + "/"
-			if !strings.Contains(pkg.PkgPath, own+"service") && !strings.Contains(pkg.PkgPath, own+"repo") {
-				t.Errorf("%s imports %s", pkg.PkgPath, path)
-			}
-		}
+	bad := []Package{{
+		ImportPath: "github.com/ecakeman/cakerdesk/internal/foo",
+		Imports:    []string{"github.com/docker/docker/client"},
+	}}
+	if err := Check(bad, DefaultRules()); err == nil {
+		t.Fatal("构造的违规依赖没有被检出")
+	}
+	allowed := []Package{{
+		ImportPath: "github.com/ecakeman/cakerdesk/internal/sandboxd",
+		Imports:    []string{"github.com/moby/moby/client"},
+	}}
+	if err := Check(allowed, DefaultRules()); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func moduleName(path string) string {
-	const mark = "/internal/"
-	i := strings.Index(path, mark)
-	if i < 0 {
-		return ""
+func loadModuleDeps(t *testing.T) []Package {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-deps", "-json", "./...")
+	cmd.Dir = moduleRoot(t)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
 	}
-	rest := path[i+len(mark):]
-	if j := strings.IndexByte(rest, '/'); j >= 0 {
-		return rest[:j]
+	dec := json.NewDecoder(bytes.NewReader(out))
+	var pkgs []Package
+	for dec.More() {
+		var row struct {
+			ImportPath string
+			Imports    []string
+		}
+		if err := dec.Decode(&row); err != nil {
+			t.Fatal(err)
+		}
+		pkgs = append(pkgs, Package{ImportPath: row.ImportPath, Imports: row.Imports})
 	}
-	return rest
+	return pkgs
+}
+
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found")
+		}
+		dir = parent
+	}
 }

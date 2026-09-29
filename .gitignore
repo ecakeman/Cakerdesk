@@ -1,3 +1,5 @@
-go/bin/
-*.exe
+var/
+.venv/
 .env
+__pycache__/
+*.pyc

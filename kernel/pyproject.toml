@@ -1,0 +1,26 @@
+[project]
+name = "cd-kernel"
+version = "0.1.0"
+description = "Cakerdesk kernel"
+authors = [
+    { name = "sancho", email = "249424373@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+cd-kernel = "cd_kernel.worker:main"
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]

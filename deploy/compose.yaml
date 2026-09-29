@@ -1,68 +1,29 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     environment:
+      POSTGRES_USER: cakerdesk
+      POSTGRES_PASSWORD: cakerdesk
       POSTGRES_DB: cakerdesk
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_INITDB_ARGS: "--locale=C.UTF-8 --encoding=UTF8"
-      CD_MIGRATE_PASSWORD: ${CD_MIGRATE_PASSWORD:-dev_cd_migrate}
-      CD_API_PASSWORD: ${CD_API_PASSWORD:-dev_cd_api}
-      CD_SYSTEM_PASSWORD: ${CD_SYSTEM_PASSWORD:-dev_cd_system}
-      CD_KERNEL_PASSWORD: ${CD_KERNEL_PASSWORD:-dev_cd_kernel}
     ports:
       - "7340:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./postgres-init.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d cakerdesk"]
-      interval: 2s
+      test: ["CMD-SHELL", "pg_isready -U cakerdesk -d cakerdesk"]
+      interval: 5s
       timeout: 3s
       retries: 20
-
   redis:
-    image: redis:7.2
-    command: ["redis-server", "--appendonly", "yes"]
+    image: redis:7
     ports:
       - "7341:6379"
-
-  migrate:
-    build:
-      context: ..
-      dockerfile: go/Dockerfile
-    command: ["migrate", "up"]
-    environment:
-      CAKERDESK_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/cakerdesk?sslmode=disable
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  api:
-    build:
-      context: ..
-      dockerfile: go/Dockerfile
-    command: ["-role=api"]
-    environment:
-      CAKERDESK_DATABASE_URL: postgres://cd_api:${CD_API_PASSWORD:-dev_cd_api}@postgres:5432/cakerdesk?sslmode=disable
-      CAKERDESK_HTTP_ADDR: ":7310"
-      CAKERDESK_INTERNAL_ADDR: ":7312"
-      CAKERDESK_INTERNAL__TOKEN: ${CAKERDESK_INTERNAL__TOKEN:-dev-internal-token}
-      CAKERDESK_MASTER_KEY: ${CAKERDESK_MASTER_KEY:-dev-master-key}
-      CAKERDESK_ENV: ${CAKERDESK_ENV:-development}
-      CAKERDESK_HTTP__SECURE_COOKIE: ${CAKERDESK_HTTP__SECURE_COOKIE:-false}
-      CAKERDESK_LLM__ALIASES: ${CAKERDESK_LLM__ALIASES:-}
-    ports:
-      - "7310:7310"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-  mock-llm:
-    build:
-      context: ../mockllm
-    ports:
-      - "7330:7330"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   pgdata:

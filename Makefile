@@ -1,28 +1,35 @@
-.PHONY: test lint lint-stubs e2e sabotage up down
+.PHONY: up down test lint lint-stubs arch e2e run-api
 
-export TESTCONTAINERS_RYUK_DISABLED ?= true
+COMPOSE = docker compose -f deploy/compose.yaml
+
+up:
+	$(COMPOSE) up -d --wait
+
+down:
+	$(COMPOSE) down
 
 test:
 	cd go && go test ./...
+	cd kernel && uv run pytest
 
 lint: lint-stubs
-	@out=$$(cd go && gofmt -l .); if [ -n "$$out" ]; then echo "$$out"; exit 1; fi
+	cd go && test -z "$$(gofmt -l .)"
 	cd go && go vet ./...
+	cd kernel && uv run ruff check .
+	$(MAKE) arch
 
 lint-stubs:
-	@! grep -RInE 'TODO|FIXME|XXX|HACK|not implemented|NotImplementedError|panic\("unimplemented"\)' \
-		--include='*.go' --include='*.py' go mockllm \
-		| grep -v '_test.go' \
-		| grep -v '/vendor/'
+	sh scripts/lint-stubs.sh
+
+arch:
+	cd go && go test ./internal/archtest/
 
 e2e:
-	cd tests/e2e && CAKERDESK_E2E_URL=$${CAKERDESK_E2E_URL:-http://127.0.0.1:7310} python3 -m pytest -q test_p0.py
+	@if [ -d tests/e2e ] && find tests/e2e -name 'test_*.py' | grep -q .; then \
+		cd kernel && uv run pytest ../tests/e2e; \
+	else \
+		echo "no e2e tests in this step"; \
+	fi
 
-sabotage:
-	bash tests/sabotage/run.sh
-
-up:
-	docker compose -f deploy/compose.yaml up -d --build
-
-down:
-	docker compose -f deploy/compose.yaml down
+run-api:
+	cd go && go run ./cmd/cakerdesk -role=api

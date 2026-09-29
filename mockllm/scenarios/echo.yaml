@@ -1,3 +1,0 @@
-name: echo
-steps:
-  - content: "ok"
