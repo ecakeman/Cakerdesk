@@ -1,15 +1,27 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
 
-func NewMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthz)
-	return mux
+	"github.com/ecakeman/cakerdesk/internal/httpx"
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct {
+	Public   *gin.Engine
+	Internal *gin.Engine
 }
 
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
+func New() *Server {
+	gin.SetMode(gin.ReleaseMode)
+	pub := gin.New()
+	pub.Use(httpx.RequestLog(), gin.Recovery())
+	pub.GET("/healthz", healthz)
+	internal := gin.New()
+	internal.Use(gin.Recovery())
+	return &Server{Public: pub, Internal: internal}
+}
+
+func healthz(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,19 +13,19 @@ import (
 
 	"github.com/ecakeman/cakerdesk/internal/api"
 	"github.com/ecakeman/cakerdesk/internal/config"
-	"github.com/ecakeman/cakerdesk/internal/httpx"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	role := "api"
-	for _, arg := range os.Args[1:] {
-		if len(arg) > 6 && arg[:6] == "-role=" {
-			role = arg[6:]
-		}
-	}
-	if role != "api" {
-		fmt.Fprintf(os.Stderr, "unknown role %s\n", role)
+	role := flag.String("role", "api", "api | reaper | sandboxd")
+	flag.Parse()
+	switch *role {
+	case "api":
+	case "reaper", "sandboxd":
+		fmt.Fprintf(os.Stderr, "unknown role %s\n", *role)
+		os.Exit(2)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown role %s\n", *role)
 		os.Exit(2)
 	}
 	if err := runAPI(); err != nil {
@@ -40,7 +41,7 @@ func runAPI() error {
 	}
 	srv := &http.Server{
 		Addr:    cfg.PublicAddr,
-		Handler: httpx.LogRequests(api.NewMux()),
+		Handler: api.New().Public,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

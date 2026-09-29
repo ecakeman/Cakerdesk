@@ -12,7 +12,7 @@ test:
 	cd go && go test ./...
 	cd kernel && uv run pytest
 
-lint: lint-stubs
+lint:
 	cd go && test -z "$$(gofmt -l .)"
 	cd go && go vet ./...
 	cd kernel && uv run ruff check .

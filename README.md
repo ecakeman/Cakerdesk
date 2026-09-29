@@ -1,4 +1,6 @@
-Cakerdesk 是可靠的长任务 Agent Runtime：进程被杀掉、抖动、工具做到一半或模型乱调工具之后，租约和事件仍能续跑，不重复副作用，不越权，并且能从事件和数据库重放。
+Cakerdesk 把一次 LLM Agent 的执行放进数据库驱动的租约里。worker 被杀掉、抖动、工具做到一半或模型乱调工具之后，Run 仍能续跑，已完成的副作用不重复，越权被拒绝，全过程能从事件和数据库复盘。
+
+实现规格是仓库根目录的 `design.md`。
 
 ## 启动
 
@@ -8,7 +10,7 @@ make run-api
 curl -s localhost:7310/healthz
 ```
 
-`make test` 跑 Go 与 kernel 测试。`make lint` 含格式、`lint-stubs` 和 archtest。`make down` 停掉 PostgreSQL 与 Redis。
+`make test` 跑 Go 与 kernel 测试。`make lint` 含格式和 archtest。`make down` 停掉 PostgreSQL 与 Redis。步骤收口时再跑 `make lint-stubs`。
 
 ## 进度
 
