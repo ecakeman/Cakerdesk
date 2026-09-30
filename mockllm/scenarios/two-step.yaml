@@ -1,0 +1,6 @@
+name: two-step
+steps:
+  - tool_calls:
+      - {name: load_skill, args: {name: csv-report}}
+  - tool_calls:
+      - {name: submit_result, args: {summary: "next"}}

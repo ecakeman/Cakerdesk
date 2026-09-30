@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestArchRules(t *testing.T) {
+func TestArchRules(t *testing.T) { // 真实模块通过；假依赖必须被抓到。
 	pkgs := loadModuleDeps(t)
 	if err := Check(pkgs, DefaultRules()); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func TestArchRules(t *testing.T) {
 	}
 }
 
-func loadModuleDeps(t *testing.T) []Package {
+func loadModuleDeps(t *testing.T) []Package { // go list -deps，覆盖间接依赖。
 	t.Helper()
 	cmd := exec.Command("go", "list", "-deps", "-json", "./...")
 	cmd.Dir = moduleRoot(t)
@@ -53,7 +53,7 @@ func loadModuleDeps(t *testing.T) []Package {
 	return pkgs
 }
 
-func moduleRoot(t *testing.T) string {
+func moduleRoot(t *testing.T) string { // 从测试工作目录向上找 go.mod。
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {

@@ -1,0 +1,6 @@
+name: flaky
+steps:
+  - tool_calls:
+      - {name: submit_result, args: {summary: "ok"}}
+errors:
+  - {step: 0, status: 429, times: 2}

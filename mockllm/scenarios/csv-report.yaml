@@ -1,0 +1,17 @@
+name: csv-report
+steps:
+  - tool_calls:
+      - {name: load_skill, args: {name: csv-report}}
+  - tool_calls:
+      - {name: read_file, args: {path: data/sales_01.csv}}
+      - {name: bash, args: {command: "python3 /skills/csv-report/scripts/aggregate.py data out/summary.csv"}}
+  - repeat: 3
+    tool_calls:
+      - {name: list_files, args: {path: out}}
+  - content: "Done."
+    tool_calls:
+      - {name: submit_result, args: {summary: "Aggregated 20 files", data: {rows: 20}}}
+errors:
+  - {step: 1, status: 429, times: 2}
+delays:
+  - {step: 2, ms: 1500}

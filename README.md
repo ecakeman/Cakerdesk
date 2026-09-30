@@ -12,15 +12,15 @@ make run-api
 curl -s localhost:7310/healthz
 ```
 
-`make test` 跑 Go 与 kernel 测试。`make lint` 含格式和 archtest。`make down` 停掉 PostgreSQL 与 Redis。步骤收口时再跑 `make lint-stubs`。
+`make test` 跑 Go、kernel 与 mockllm 测试。`make lint` 含格式和 archtest。`make down` 停掉 PostgreSQL、Redis 与 mock-llm。步骤收口时再跑 `make lint-stubs`。
 
-Go 1.25、Gin v1.10.1、pgx v5、goose v3、sqlc 生成 `internal/store`。
+Go 1.25、Gin v1.10.1、pgx v5、goose v3、sqlc 生成 `internal/store`。Mock LLM 在 `:7330`。
 
 ## 进度
 
 - [x] A1 仓库与本地基础设施
 - [x] A2 数据库与 Agent 版本
-- [ ] A3 Mock LLM
+- [x] A3 Mock LLM
 - [ ] B1 Session / Run 入队
 - [ ] B2 Claim
 - [ ] B3 LangGraph kernel

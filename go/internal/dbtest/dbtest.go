@@ -69,7 +69,7 @@ func New(t *testing.T) *Env {
 	return env
 }
 
-func (e *Env) Close(t *testing.T) {
+func (e *Env) Close(t *testing.T) { // 关掉连接后删临时库。
 	t.Helper()
 	e.App.Close()
 	e.Migrate.Close()
@@ -85,7 +85,7 @@ func (e *Env) Close(t *testing.T) {
 	_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+e.Name)
 }
 
-func rewriteURL(raw, user, pass, dbname string) string {
+func rewriteURL(raw, user, pass, dbname string) string { // 把超级用户 URL 改成某角色连临时库。
 	u, err := url.Parse(raw)
 	if err != nil {
 		panic(err)
@@ -95,16 +95,16 @@ func rewriteURL(raw, user, pass, dbname string) string {
 	return u.String()
 }
 
-func randHex(n int) string {
+func randHex(n int) string { // 临时库名后缀。
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-func (e *Env) AppURL() string {
+func (e *Env) AppURL() string { // cd_app 连接串。
 	return rewriteURL(e.AdminURL, "cd_app", "cd_app", e.Name)
 }
 
-func (e *Env) MigrateURL() string {
+func (e *Env) MigrateURL() string { // cd_migrate 连接串。
 	return rewriteURL(e.AdminURL, "cd_migrate", "cd_migrate", e.Name)
 }

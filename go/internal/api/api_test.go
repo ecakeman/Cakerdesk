@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestHealthz(t *testing.T) {
+func TestHealthz(t *testing.T) { // Ping 库成功则 200 ok。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	res := do(t, srv, http.MethodGet, "/healthz", "", nil)
@@ -37,7 +37,7 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestAuthRequired(t *testing.T) {
+func TestAuthRequired(t *testing.T) { // 无钥匙或错钥匙都是 401。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	res := do(t, srv, http.MethodGet, "/v1/agents", "", nil)
@@ -46,7 +46,7 @@ func TestAuthRequired(t *testing.T) {
 	assertError(t, res, http.StatusUnauthorized, "unauthorized")
 }
 
-func TestPublishIncrementsVersion(t *testing.T) {
+func TestPublishIncrementsVersion(t *testing.T) { // 不同配置版本 1 然后 2。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	id := createAgent(t, srv, "inc-agent")
@@ -60,7 +60,7 @@ func TestPublishIncrementsVersion(t *testing.T) {
 	}
 }
 
-func TestPublishSameConfigIsIdempotent(t *testing.T) {
+func TestPublishSameConfigIsIdempotent(t *testing.T) { // 相同 hash 不升版本。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	id := createAgent(t, srv, "idem-agent")
@@ -72,7 +72,7 @@ func TestPublishSameConfigIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestPublishConcurrent(t *testing.T) {
+func TestPublishConcurrent(t *testing.T) { // 十个并发不同配置，版本恰好 1–10。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	id := createAgent(t, srv, "conc-agent")
@@ -121,7 +121,7 @@ func TestPublishConcurrent(t *testing.T) {
 	}
 }
 
-func TestConfigValidation(t *testing.T) {
+func TestConfigValidation(t *testing.T) { // 每条规则至少一个反例。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	id := createAgent(t, srv, "val-agent")
@@ -142,7 +142,7 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-func TestAgentVersionImmutable(t *testing.T) {
+func TestAgentVersionImmutable(t *testing.T) { // cd_app 改历史版本得 42501。
 	env := dbtest.New(t)
 	srv := newTestServer(t, env)
 	id := createAgent(t, srv, "imm-agent")
@@ -156,7 +156,7 @@ func TestAgentVersionImmutable(t *testing.T) {
 	}
 }
 
-func TestDefaultPrivileges(t *testing.T) {
+func TestDefaultPrivileges(t *testing.T) { // migrate 新建表后 cd_app 能 SELECT。
 	env := dbtest.New(t)
 	ctx := context.Background()
 	if _, err := env.Migrate.Exec(ctx, "CREATE TABLE dp_probe (id int)"); err != nil {
@@ -167,14 +167,14 @@ func TestDefaultPrivileges(t *testing.T) {
 	}
 }
 
-func newTestServer(t *testing.T, env *dbtest.Env) *httptest.Server {
+func newTestServer(t *testing.T, env *dbtest.Env) *httptest.Server { // 用测试库和固定钥匙起 HTTP。
 	t.Helper()
 	ts := httptest.NewServer(New(env.App, "test-key").Public)
 	t.Cleanup(ts.Close)
 	return ts
 }
 
-func createAgent(t *testing.T, srv *httptest.Server, name string) string {
+func createAgent(t *testing.T, srv *httptest.Server, name string) string { // 返回新 agent id。
 	t.Helper()
 	res := do(t, srv, http.MethodPost, "/v1/agents", "test-key", map[string]string{"name": name})
 	defer res.Body.Close()
@@ -194,7 +194,7 @@ func createAgent(t *testing.T, srv *httptest.Server, name string) string {
 	return body.ID
 }
 
-func publish(t *testing.T, srv *httptest.Server, id string, cfg map[string]any, want int) int {
+func publish(t *testing.T, srv *httptest.Server, id string, cfg map[string]any, want int) int { // 发布并返回 version。
 	t.Helper()
 	res := do(t, srv, http.MethodPost, "/v1/agents/"+id+"/versions", "test-key", map[string]any{"config": cfg})
 	defer res.Body.Close()
@@ -215,7 +215,7 @@ func publish(t *testing.T, srv *httptest.Server, id string, cfg map[string]any, 
 	return body.Version
 }
 
-func validConfig(prompt string) map[string]any {
+func validConfig(prompt string) map[string]any { // A2 能过校验的最小配置。
 	return map[string]any{
 		"model":         "mock-1",
 		"system_prompt": prompt,
@@ -223,7 +223,7 @@ func validConfig(prompt string) map[string]any {
 	}
 }
 
-func do(t *testing.T, srv *httptest.Server, method, path, key string, body any) *http.Response {
+func do(t *testing.T, srv *httptest.Server, method, path, key string, body any) *http.Response { // 可选 Bearer 的 HTTP 调用。
 	t.Helper()
 	var rdr io.Reader
 	if body != nil {
@@ -250,7 +250,7 @@ func do(t *testing.T, srv *httptest.Server, method, path, key string, body any) 
 	return res
 }
 
-func assertError(t *testing.T, res *http.Response, status int, code string) {
+func assertError(t *testing.T, res *http.Response, status int, code string) { // 检查 HTTP 状态和 error.code。
 	t.Helper()
 	defer res.Body.Close()
 	if res.StatusCode != status {
@@ -270,7 +270,7 @@ func assertError(t *testing.T, res *http.Response, status int, code string) {
 	}
 }
 
-func pgCode(err error) string {
+func pgCode(err error) string { // 抽出 SQLSTATE。
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) {
 		return pg.Code
@@ -278,7 +278,7 @@ func pgCode(err error) string {
 	return ""
 }
 
-func TestMain(m *testing.M) {
+func TestMain(m *testing.M) { // 未显式设置时指向 compose 的 postgres。
 	if os.Getenv("CD_TEST_DATABASE_URL") == "" {
 		os.Setenv("CD_TEST_DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:7340/postgres?sslmode=disable")
 	}

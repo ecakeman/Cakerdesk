@@ -46,6 +46,7 @@ type rawConfig struct {
 
 // ParseAndNormalize 校验 AgentConfig、补缺省、按结构体字段顺序序列化后再算 sha256。
 func ParseAndNormalize(raw json.RawMessage) (Config, string, error) {
+	// 未知字段必须失败，路径写进 message。
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var in rawConfig
@@ -56,6 +57,7 @@ func ParseAndNormalize(raw json.RawMessage) (Config, string, error) {
 		}
 		return Config{}, "", apperr.New(http.StatusBadRequest, "invalid_config", "config")
 	}
+	// 缺省与 design.md 示例一致；skills 未给则空数组。
 	cfg := Config{
 		Limits: Limits{
 			MaxLLMCalls:    40,
@@ -105,6 +107,7 @@ func ParseAndNormalize(raw json.RawMessage) (Config, string, error) {
 	if err := validate(cfg); err != nil {
 		return Config{}, "", err
 	}
+	// 规范化：结构体字段顺序的 JSON，再 sha256。比较只认这个 hash。
 	norm, err := json.Marshal(cfg)
 	if err != nil {
 		return Config{}, "", err
@@ -113,6 +116,7 @@ func ParseAndNormalize(raw json.RawMessage) (Config, string, error) {
 	return cfg, hex.EncodeToString(sum[:]), nil
 }
 
+// decodeLimits 解析 limits 对象；未知键带上 limits. 前缀。
 func decodeLimits(raw json.RawMessage) (Limits, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -127,6 +131,7 @@ func decodeLimits(raw json.RawMessage) (Limits, error) {
 	return lim, nil
 }
 
+// decodeContext 解析 context 对象；未知键带上 context. 前缀。
 func decodeContext(raw json.RawMessage) (Context, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -141,6 +146,7 @@ func decodeContext(raw json.RawMessage) (Context, error) {
 	return ctx, nil
 }
 
+// validate 注册表、submit_result、limits/context 数值范围。
 func validate(cfg Config) error {
 	if len(cfg.Tools) == 0 {
 		return invalid("tools")
@@ -186,10 +192,12 @@ func validate(cfg Config) error {
 	return nil
 }
 
+// invalid 配置错误统一 400 invalid_config，message 是字段路径。
 func invalid(path string) error {
 	return apperr.New(http.StatusBadRequest, "invalid_config", path)
 }
 
+// unknownFieldPath 从 encoding/json 的未知字段错误里抽出字段名。
 func unknownFieldPath(err error) string {
 	const prefix = "json: unknown field "
 	s := err.Error()
@@ -199,6 +207,7 @@ func unknownFieldPath(err error) string {
 	return strings.Trim(strings.TrimPrefix(s, prefix), `"`)
 }
 
+// MustJSON 入库前把已规范化的结构再编成 jsonb。失败只可能是程序错误。
 func MustJSON(cfg Config) json.RawMessage {
 	b, err := json.Marshal(cfg)
 	if err != nil {
@@ -207,6 +216,7 @@ func MustJSON(cfg Config) json.RawMessage {
 	return b
 }
 
+// ParseStored 读库里已经规范化过的 config。
 func ParseStored(raw json.RawMessage) (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(raw, &cfg); err != nil {

@@ -1,0 +1,5 @@
+name: pair
+steps:
+  - tool_calls:
+      - {name: read_file, args: {path: a.txt}}
+      - {name: bash, args: {command: "echo x"}}

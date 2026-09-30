@@ -23,6 +23,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  mock-llm:
+    build:
+      context: ../mockllm
+    ports:
+      - "7330:7330"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7330/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   pgdata:

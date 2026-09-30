@@ -12,6 +12,7 @@ type Config struct {
 	APIKey             string
 }
 
+// Load 读环境变量。A2 起数据库 URL 和 API Key 缺了就不能启动。
 func Load() (Config, error) {
 	cfg := Config{
 		PublicAddr:         envDefault("CD_PUBLIC_ADDR", ":7310"),
@@ -31,6 +32,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// envDefault 空字符串当没配。
 func envDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

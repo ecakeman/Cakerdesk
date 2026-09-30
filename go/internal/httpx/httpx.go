@@ -15,6 +15,7 @@ import (
 
 const maxBody = 1 << 20 // 1MiB
 
+// WriteError 领域错误按 code 返回；其余记日志后 500 internal。
 func WriteError(c *gin.Context, err error) {
 	var ae *apperr.Error
 	if errors.As(err, &ae) && ae != nil {
@@ -50,6 +51,7 @@ func BindJSON(c *gin.Context, dst any) error {
 	return nil
 }
 
+// RequestLog 在 handler 跑完后记 method/path/status/耗时。
 func RequestLog() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()

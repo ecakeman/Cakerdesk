@@ -18,11 +18,13 @@ sqlc:
 test:
 	cd go && go test ./...
 	cd kernel && uv run pytest
+	cd mockllm && uv run pytest
 
 lint:
 	cd go && test -z "$$(gofmt -l .)"
 	cd go && go vet ./...
 	cd kernel && uv run ruff check .
+	cd mockllm && uv run ruff check .
 	$(MAKE) arch
 
 lint-stubs:

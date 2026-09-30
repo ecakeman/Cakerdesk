@@ -1,0 +1,6 @@
+name: repeater
+steps:
+  - repeat: 3
+    tool_calls:
+      - {name: list_files, args: {path: out}}
+  - content: "Done."

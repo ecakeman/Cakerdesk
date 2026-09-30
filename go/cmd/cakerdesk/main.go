@@ -19,8 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-func main() {
+func main() { // 入口：migrate 子命令或 -role=api。
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	// 子命令 migrate 与 -role 进程分开。
 	if len(os.Args) >= 2 && os.Args[1] == "migrate" {
 		if err := runMigrate(os.Args[2:]); err != nil {
 			slog.Error("migrate", "err", err.Error())
@@ -45,6 +46,7 @@ func main() {
 	}
 }
 
+// runMigrate 用 cd_migrate 连接串执行 goose。
 func runMigrate(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -59,6 +61,7 @@ func runMigrate(args []string) error {
 	return migrate.Cmd(stdlib.OpenDBFromPool(pool), args)
 }
 
+// runAPI 连 cd_app 库，对外提供 Public 引擎，收到信号后 Shutdown。
 func runAPI() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -77,6 +80,7 @@ func runAPI() error {
 		Addr:    cfg.PublicAddr,
 		Handler: api.New(pool, cfg.APIKey).Public,
 	}
+	// 阻塞直到进程被杀或 Listen 自己退出，再给 5 秒收尾。
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)

@@ -1,0 +1,5 @@
+name: simple
+steps:
+  - tool_calls:
+      - {name: submit_result, args: {summary: "ok"}}
+  - content: "Done."
