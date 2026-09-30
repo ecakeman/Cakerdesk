@@ -13,7 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const maxBody = 1 << 20
+const maxBody = 1 << 20 // 1MiB
 
 func WriteError(c *gin.Context, err error) {
 	var ae *apperr.Error
@@ -29,6 +29,8 @@ func WriteError(c *gin.Context, err error) {
 	})
 }
 
+// BindJSON 把请求体解进 dst。
+// 超过 1MiB、不是 JSON、有未知字段、一份 body 里塞了两段 JSON，都返回 400。
 func BindJSON(c *gin.Context, dst any) error {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxBody+1))
 	if err != nil {
@@ -37,14 +39,12 @@ func BindJSON(c *gin.Context, dst any) error {
 	if len(body) > maxBody {
 		return apperr.New(http.StatusBadRequest, "invalid_json", "请求体超过 1MiB")
 	}
-	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return apperr.New(http.StatusBadRequest, "invalid_json", "请求体不是合法 JSON")
 	}
-	var extra struct{}
-	if err := dec.Decode(&extra); err != io.EOF {
+	if dec.More() {
 		return apperr.New(http.StatusBadRequest, "invalid_json", "请求体包含多余内容")
 	}
 	return nil

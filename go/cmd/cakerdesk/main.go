@@ -10,13 +10,24 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ecakeman/cakerdesk/internal/api"
 	"github.com/ecakeman/cakerdesk/internal/config"
+	"github.com/ecakeman/cakerdesk/internal/migrate"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	if len(os.Args) >= 2 && os.Args[1] == "migrate" {
+		if err := runMigrate(os.Args[2:]); err != nil {
+			slog.Error("migrate", "err", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	role := flag.String("role", "api", "api | reaper | sandboxd")
 	flag.Parse()
 	switch *role {
@@ -34,16 +45,39 @@ func main() {
 	}
 }
 
+func runMigrate(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, cfg.MigrateDatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	return migrate.Cmd(stdlib.OpenDBFromPool(pool), args)
+}
+
 func runAPI() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:    cfg.PublicAddr,
-		Handler: api.New().Public,
+		Handler: api.New(pool, cfg.APIKey).Public,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)
 	go func() {
@@ -55,7 +89,9 @@ func runAPI() error {
 			return nil
 		}
 		return err
-	case <-ctx.Done():
+	case <-sigCtx.Done():
 	}
-	return srv.Shutdown(context.Background())
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }

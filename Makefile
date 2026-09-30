@@ -1,12 +1,19 @@
-.PHONY: up down test lint lint-stubs arch e2e run-api
+.PHONY: up down test lint lint-stubs arch e2e run-api migrate sqlc
 
 COMPOSE = docker compose -f deploy/compose.yaml
+export CD_TEST_DATABASE_URL ?= postgres://postgres:postgres@127.0.0.1:7340/postgres?sslmode=disable
 
 up:
 	$(COMPOSE) up -d --wait
 
 down:
 	$(COMPOSE) down
+
+migrate:
+	cd go && go run ./cmd/cakerdesk migrate up
+
+sqlc:
+	cd go && sqlc generate
 
 test:
 	cd go && go test ./...
