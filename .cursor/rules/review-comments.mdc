@@ -14,3 +14,5 @@ alwaysApply: true
 API 只用常用的（标准库、Gin、pgx、goose、sqlc 查询名）。生僻写法把思路写在注释里，不要求用户抠实现。
 
 对用户的 review 重心是思路：谁调用谁、改了什么状态、为什么边界在这。不要把函数当 API 手册讲。
+
+一步做完就单独提交（信息写清是哪一步），并 `git push origin`。不要把 A2、A3 揉进同一个 commit。不改写已推送的历史，不 force push。
