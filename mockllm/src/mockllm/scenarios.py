@@ -13,11 +13,10 @@ SCENARIO_RE = re.compile(r"\[\[scenario:([^\]]+)\]\]")
 
 
 class ScenarioError(ValueError):
-    """场景文件不合法，启动时直接失败。"""
+    pass
 
 
 def load_dir(root: Path) -> dict[str, dict[str, Any]]:
-    """读目录下全部 yaml，重名或非法则抛错。"""
     out: dict[str, dict[str, Any]] = {}
     for path in sorted(root.glob("*.yaml")):
         data = yaml.safe_load(path.read_text())
@@ -39,7 +38,7 @@ def load_dir(root: Path) -> dict[str, dict[str, Any]]:
 
 
 def expand_steps(raw: list[Any], path: Path) -> list[dict[str, Any]]:
-    """把 repeat 展开成逐步列表，并检查 content 无 tool_calls 只能在最后。"""
+    """repeat 在启动时展开。纯文本且没有 tool_calls 的步骤只能是最后一步，否则后面的步骤永远走不到。"""
     if not raw:
         raise ScenarioError(f"{path} 没有 steps")
     expanded: list[dict[str, Any]] = []
@@ -64,7 +63,7 @@ def expand_steps(raw: list[Any], path: Path) -> list[dict[str, Any]]:
 
 
 def scenario_from_messages(messages: list[dict[str, Any]]) -> str | None:
-    """从第一条 user 消息抽出 [[scenario:NAME]]。"""
+    """只认第一条 user。后面的消息里再写 scenario 不会换场景，避免工具结果里的文本把步骤带偏。"""
     for msg in messages:
         if msg.get("role") != "user":
             continue
@@ -77,7 +76,9 @@ def scenario_from_messages(messages: list[dict[str, Any]]) -> str | None:
 
 
 def next_step(messages: list[dict[str, Any]], n_steps: int) -> int:
-    """从后往前找最后一条带 tool_calls 的 assistant。id 合法则步号 +1，否则 0。"""
+    """步号从最后一条带 tool_calls 的 assistant id 里取，再加 1。
+    不能在服务端记「这个用户走到第几步」：内核崩溃后重发同一段历史会错位。
+    id 对不上格式就回到步骤 0。超过最后一步则停在最后一步，避免数组越界。"""
     if n_steps <= 0:
         return 0
     for msg in reversed(messages):

@@ -17,18 +17,15 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def _fresh() -> None:
-    """每个测试重新加载场景并清计数。"""
     load_scenarios()
     reset_state()
 
 
 def complete(messages: list, user: str = "u1") -> httpx.Response:
-    """打一次 Chat Completions。"""
     return client.post("/v1/chat/completions", json={"messages": messages, "user": user})
 
 
 def user_msg(scenario: str) -> dict:
-    """第一条 user 消息里带场景名。"""
     return {"role": "user", "content": f"go [[scenario:{scenario}]]"}
 
 
@@ -53,7 +50,6 @@ def test_arguments_are_json() -> None:
 
 
 def json_loads(s: str) -> dict:
-    """arguments 必须是 JSON 字符串。"""
     return json.loads(s)
 
 
@@ -131,7 +127,6 @@ def test_invalid_scenario_rejected_at_startup(tmp_path: Path) -> None:
 
 
 def test_openai_sdk_parses() -> None:
-    """完成标准：官方 SDK 能解析 mock 的响应。"""
     import uvicorn
 
     config = uvicorn.Config(app, host="127.0.0.1", port=18733, log_level="error")

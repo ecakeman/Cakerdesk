@@ -21,7 +21,8 @@ type Env struct {
 	AdminURL string
 }
 
-// New 建一个临时库、跑完全部迁移，测试结束时删掉。
+// 每个测试一个库，迁移和权限互不影响。
+// 必须用超级用户建库，再用 cd_migrate 跑迁移。超级用户建表的话，默认授权不会给到 cd_app。
 func New(t *testing.T) *Env {
 	t.Helper()
 	adminURL := os.Getenv("CD_TEST_DATABASE_URL")
@@ -69,7 +70,7 @@ func New(t *testing.T) *Env {
 	return env
 }
 
-func (e *Env) Close(t *testing.T) { // 关掉连接后删临时库。
+func (e *Env) Close(t *testing.T) {
 	t.Helper()
 	e.App.Close()
 	e.Migrate.Close()
@@ -85,7 +86,7 @@ func (e *Env) Close(t *testing.T) { // 关掉连接后删临时库。
 	_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+e.Name)
 }
 
-func rewriteURL(raw, user, pass, dbname string) string { // 把超级用户 URL 改成某角色连临时库。
+func rewriteURL(raw, user, pass, dbname string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		panic(err)
@@ -95,16 +96,16 @@ func rewriteURL(raw, user, pass, dbname string) string { // 把超级用户 URL 
 	return u.String()
 }
 
-func randHex(n int) string { // 临时库名后缀。
+func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-func (e *Env) AppURL() string { // cd_app 连接串。
+func (e *Env) AppURL() string {
 	return rewriteURL(e.AdminURL, "cd_app", "cd_app", e.Name)
 }
 
-func (e *Env) MigrateURL() string { // cd_migrate 连接串。
+func (e *Env) MigrateURL() string {
 	return rewriteURL(e.AdminURL, "cd_migrate", "cd_migrate", e.Name)
 }

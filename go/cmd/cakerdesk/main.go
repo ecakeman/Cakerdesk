@@ -19,9 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-func main() { // 入口：migrate 子命令或 -role=api。
+func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	// 子命令 migrate 与 -role 进程分开。
+	// migrate 不走 -role。flag 会把未知子命令当成参数，两个入口必须先分开。
 	if len(os.Args) >= 2 && os.Args[1] == "migrate" {
 		if err := runMigrate(os.Args[2:]); err != nil {
 			slog.Error("migrate", "err", err.Error())
@@ -31,6 +31,7 @@ func main() { // 入口：migrate 子命令或 -role=api。
 	}
 	role := flag.String("role", "api", "api | reaper | sandboxd")
 	flag.Parse()
+	// reaper、sandboxd 名字合法，但这步还没实现。退出码 2，避免空进程看起来像在跑。
 	switch *role {
 	case "api":
 	case "reaper", "sandboxd":
@@ -46,7 +47,6 @@ func main() { // 入口：migrate 子命令或 -role=api。
 	}
 }
 
-// runMigrate 用 cd_migrate 连接串执行 goose。
 func runMigrate(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -61,7 +61,6 @@ func runMigrate(args []string) error {
 	return migrate.Cmd(stdlib.OpenDBFromPool(pool), args)
 }
 
-// runAPI 连 cd_app 库，对外提供 Public 引擎，收到信号后 Shutdown。
 func runAPI() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -80,7 +79,8 @@ func runAPI() error {
 		Addr:    cfg.PublicAddr,
 		Handler: api.New(pool, cfg.APIKey).Public,
 	}
-	// 阻塞直到进程被杀或 Listen 自己退出，再给 5 秒收尾。
+	// Listen 放进 goroutine，主协程才能接到 SIGINT 再 Shutdown。
+	// 5 秒到了还关不掉就返回错误，避免连接不放时进程一直挂着。
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)

@@ -23,7 +23,6 @@ type Server struct {
 	apiKey   string
 }
 
-// New 装配两个 Gin 引擎并挂上当前步骤的路由。
 func New(pool *pgxpool.Pool, apiKey string) *Server {
 	s := &Server{
 		pool:   pool,
@@ -31,7 +30,6 @@ func New(pool *pgxpool.Pool, apiKey string) *Server {
 		apiKey: apiKey,
 	}
 	gin.SetMode(gin.ReleaseMode)
-	// Public：健康检查 + 带钥匙的 /v1。Internal 这步只建引擎，不监听。
 	pub := gin.New()
 	pub.Use(httpx.RequestLog(), gin.Recovery())
 	pub.GET("/healthz", s.healthz)
@@ -41,6 +39,7 @@ func New(pool *pgxpool.Pool, apiKey string) *Server {
 	v1.GET("/agents/:id", s.getAgent)
 	v1.POST("/agents/:id/versions", s.publishVersion)
 	v1.GET("/agents/:id/versions/:version", s.getVersion)
+	// Internal 先建好但不 Listen。现在绑上会变成没有内部钥匙的端口。
 	internal := gin.New()
 	internal.Use(gin.Recovery())
 	s.Public = pub
@@ -48,7 +47,7 @@ func New(pool *pgxpool.Pool, apiKey string) *Server {
 	return s
 }
 
-// healthz 探活数据库；连不上对监控来说就是挂了。
+// 进程还活着不代表能写数据。库 ping 失败返回 503，避免健康检查把挂掉的库当成正常。
 func (s *Server) healthz(c *gin.Context) {
 	if err := s.pool.Ping(c.Request.Context()); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
@@ -57,8 +56,9 @@ func (s *Server) healthz(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// requireKey 校验公共 API 的静态钥匙。缺 Bearer 或对不上都 401。
 func (s *Server) requireKey(c *gin.Context) {
+	// 没有 "Bearer " 前缀时 TrimPrefix 原样返回，下面当成没带钥匙。
+	// hmac.Equal 不因长度提前返回，避免用耗时猜钥匙。
 	got := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 	if got == c.GetHeader("Authorization") || !hmac.Equal([]byte(got), []byte(s.apiKey)) {
 		httpx.WriteError(c, apperr.New(http.StatusUnauthorized, "unauthorized", "未授权"))
@@ -66,7 +66,6 @@ func (s *Server) requireKey(c *gin.Context) {
 	}
 }
 
-// createAgent POST /v1/agents
 func (s *Server) createAgent(c *gin.Context) {
 	var req struct {
 		Name string `json:"name"`
@@ -83,7 +82,6 @@ func (s *Server) createAgent(c *gin.Context) {
 	c.JSON(http.StatusCreated, agentJSON(agent))
 }
 
-// listAgents GET /v1/agents，最多 200 条。
 func (s *Server) listAgents(c *gin.Context) {
 	items, err := s.agents.List(c.Request.Context())
 	if err != nil {
@@ -97,10 +95,10 @@ func (s *Server) listAgents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": out})
 }
 
-// getAgent GET /v1/agents/:id，非法 uuid 与查无都当 404。
 func (s *Server) getAgent(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
+		// 格式不对也 404。客户端不用区分「写错了」和「没有这行」。
 		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "agent 不存在"))
 		return
 	}
@@ -112,7 +110,6 @@ func (s *Server) getAgent(c *gin.Context) {
 	c.JSON(http.StatusOK, agentJSON(agent))
 }
 
-// publishVersion POST /v1/agents/:id/versions。HTTP 码由 Publish 决定（200 幂等 / 201 新版本）。
 func (s *Server) publishVersion(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -131,10 +128,10 @@ func (s *Server) publishVersion(c *gin.Context) {
 		httpx.WriteError(c, err)
 		return
 	}
+	// 200：配置没变，不能再插一行。201：新版本。码由 Publish 决定。
 	c.JSON(status, versionJSON(ver))
 }
 
-// getVersion GET /v1/agents/:id/versions/:version
 func (s *Server) getVersion(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -154,7 +151,6 @@ func (s *Server) getVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, versionJSON(ver))
 }
 
-// agentJSON 列表和详情共用的对外字段。
 func agentJSON(a agents.Agent) gin.H {
 	return gin.H{
 		"id":              a.ID.String(),
@@ -163,7 +159,6 @@ func agentJSON(a agents.Agent) gin.H {
 	}
 }
 
-// versionJSON 返回规范化后的 config 和 hash。
 func versionJSON(v agents.Version) gin.H {
 	return gin.H{
 		"version":     v.Version,

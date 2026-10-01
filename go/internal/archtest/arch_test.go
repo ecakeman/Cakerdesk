@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestArchRules(t *testing.T) { // 真实模块通过；假依赖必须被抓到。
+func TestArchRules(t *testing.T) {
 	pkgs := loadModuleDeps(t)
 	if err := Check(pkgs, DefaultRules()); err != nil {
 		t.Fatal(err)
@@ -30,8 +30,9 @@ func TestArchRules(t *testing.T) { // 真实模块通过；假依赖必须被抓
 	}
 }
 
-func loadModuleDeps(t *testing.T) []Package { // go list -deps，覆盖间接依赖。
+func loadModuleDeps(t *testing.T) []Package {
 	t.Helper()
+	// 扫源码文本会漏掉间接依赖。go list -deps 看的是编译器用的依赖图。
 	cmd := exec.Command("go", "list", "-deps", "-json", "./...")
 	cmd.Dir = moduleRoot(t)
 	out, err := cmd.Output()
@@ -53,7 +54,7 @@ func loadModuleDeps(t *testing.T) []Package { // go list -deps，覆盖间接依
 	return pkgs
 }
 
-func moduleRoot(t *testing.T) string { // 从测试工作目录向上找 go.mod。
+func moduleRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {

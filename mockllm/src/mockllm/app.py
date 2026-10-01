@@ -20,6 +20,7 @@ SCENARIO_DIR = Path(__file__).resolve().parents[2] / "scenarios"
 ALPH = string.ascii_lowercase + string.digits
 
 app = FastAPI()
+# _append_log 也会拿这把锁。429 分支是先拿锁再记日志，普通 Lock 会自己等自己。
 _lock = threading.RLock()
 _scenarios: dict[str, dict[str, Any]] = {}
 _errors: dict[tuple[str, int], int] = defaultdict(int)
@@ -27,13 +28,11 @@ _log: list[dict[str, Any]] = []
 
 
 def load_scenarios(root: Path | None = None) -> None:
-    """启动时加载场景。测试可换目录。"""
     global _scenarios
     _scenarios = load_dir(root or SCENARIO_DIR)
 
 
 def reset_state() -> None:
-    """清空错误计数和请求日志。"""
     with _lock:
         _errors.clear()
         _log.clear()
@@ -47,20 +46,17 @@ except FileNotFoundError:
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    """compose 探活。"""
     return {"status": "ok"}
 
 
 @app.post("/mock/reset")
 def mock_reset() -> dict[str, str]:
-    """测试夹具：清计数。"""
     reset_state()
     return {"status": "ok"}
 
 
 @app.get("/mock/requests")
 def mock_requests(user: str = Query(default="")) -> dict[str, Any]:
-    """最近 500 条摘要，可按请求体 user 过滤。"""
     with _lock:
         items = list(_log[-500:])
     if user != "":
@@ -70,11 +66,11 @@ def mock_requests(user: str = Query(default="")) -> dict[str, Any]:
 
 @app.post("/v1/chat/completions")
 def chat_completions(body: dict[str, Any]) -> JSONResponse:
-    """Chat Completions。步骤从 messages 推断，不靠内存游标。"""
+    """步骤只从这一次 messages 推。服务端记游标的话，内核崩溃后重放同一段历史会错位。"""
     messages = body.get("messages") or []
     if not isinstance(messages, list):
         raise HTTPException(400, "messages")
-    # 压缩模式：不推进步骤。
+    # 摘要不推进场景步骤。压缩上下文和「下一轮该调哪个工具」不是一回事。
     if _summarize(messages):
         return JSONResponse(_summary_payload(messages))
     name = scenario_from_messages(messages)
@@ -84,7 +80,7 @@ def chat_completions(body: dict[str, Any]) -> JSONResponse:
     steps = scene["steps"]
     step = next_step(messages, len(steps))
     user = str(body.get("user") or "")
-    # 错误注入按 (user, step) 计数。
+    # 计数键带 user。换一个 user 必须从头计，否则测试互相把 429 次数用光。
     err = _match_error(scene["errors"], step)
     if err is not None:
         with _lock:
@@ -133,9 +129,9 @@ def _match_delay(items: list[Any], step: int) -> dict[str, Any] | None:
 
 
 def _completion(step: dict[str, Any], step_no: int, messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """按场景一步生成 assistant。id 含随机后缀，测试不能写死。"""
     calls_out = []
     for i, call in enumerate(step.get("tool_calls") or []):
+        # 后缀随机。步号在 id 里，但测试不能依赖某一次生成出来的完整 id。
         suffix = "".join(random.choice(ALPH) for _ in range(6))
         cid = f"call_{step_no}_{i}_{suffix}"
         args = call.get("args") or {}
@@ -183,7 +179,6 @@ def _append_log(user: str, scenario: str, step: int, status: int) -> None:
 
 
 def serve() -> None:
-    """compose / 本机入口。"""
     import uvicorn
 
     load_scenarios()

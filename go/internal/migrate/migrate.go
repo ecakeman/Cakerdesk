@@ -8,32 +8,32 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
-func init() { // 迁移 SQL 打进二进制，不读磁盘目录。
+func init() {
 	goose.SetBaseFS(migrations.FS)
 }
 
-func Up(db *sql.DB) error { // 执行尚未应用的 Up。
+func Up(db *sql.DB) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return err
 	}
 	return goose.Up(db, ".")
 }
 
-func Down(db *sql.DB) error { // 回滚最近一条。
+func Down(db *sql.DB) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return err
 	}
 	return goose.Down(db, ".")
 }
 
-func Status(db *sql.DB) error { // 打印当前版本。
+func Status(db *sql.DB) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return err
 	}
 	return goose.Status(db, ".")
 }
 
-func Cmd(db *sql.DB, args []string) error { // 解析 up|down|status。
+func Cmd(db *sql.DB, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("migrate up|down|status")
 	}

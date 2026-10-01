@@ -15,7 +15,6 @@ import (
 
 const maxBody = 1 << 20 // 1MiB
 
-// WriteError 领域错误按 code 返回；其余记日志后 500 internal。
 func WriteError(c *gin.Context, err error) {
 	var ae *apperr.Error
 	if errors.As(err, &ae) && ae != nil {
@@ -25,13 +24,13 @@ func WriteError(c *gin.Context, err error) {
 		return
 	}
 	slog.Error("internal", "err", err.Error())
+	// 不是领域错误就 500，不把 SQL 或内部原文返回给客户端。
 	c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 		"error": gin.H{"code": "internal", "message": "内部错误"},
 	})
 }
 
-// BindJSON 把请求体解进 dst。
-// 超过 1MiB、不是 JSON、有未知字段、一份 body 里塞了两段 JSON，都返回 400。
+// 不用 c.ShouldBindJSON。Gin 默认不拒绝未知字段，也不会按 1MiB 截断，多出来的键会进库。
 func BindJSON(c *gin.Context, dst any) error {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxBody+1))
 	if err != nil {
@@ -51,7 +50,6 @@ func BindJSON(c *gin.Context, dst any) error {
 	return nil
 }
 
-// RequestLog 在 handler 跑完后记 method/path/status/耗时。
 func RequestLog() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
