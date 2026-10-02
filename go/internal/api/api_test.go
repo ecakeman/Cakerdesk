@@ -12,6 +12,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ecakeman/cakerdesk/internal/dbtest"
 	"github.com/google/uuid"
@@ -175,7 +176,14 @@ func newTestServer(t *testing.T, env *dbtest.Env) *httptest.Server {
 
 func newTestServerIn(t *testing.T, env *dbtest.Env, dir string) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(New(env.App, "test-key", dir).Public)
+	ts := httptest.NewServer(New(env.App, Options{
+		APIKey:           "test-key",
+		WorkspacesDir:    dir,
+		InternalToken:    "internal-test",
+		LeaseSeconds:     30,
+		HeartbeatSeconds: 10,
+		ClaimMaxWait:     20 * time.Second,
+	}).Public)
 	t.Cleanup(ts.Close)
 	return ts
 }

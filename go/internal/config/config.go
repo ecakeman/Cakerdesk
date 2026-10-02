@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 type Config struct {
@@ -11,16 +12,38 @@ type Config struct {
 	MigrateDatabaseURL string
 	APIKey             string
 	WorkspacesDir      string
+	InternalAddr       string
+	InternalToken      string
+	LeaseSeconds       int
+	HeartbeatSeconds   int
+	ClaimMaxWaitMS     int
 }
 
-// 缺数据库 URL 或 API Key 直接启动失败。空着等到第一条请求才爆，分不清是配置还是库。
+// 缺数据库 URL、API Key 或内部钥匙直接启动失败。空着等到第一条请求才爆，分不清是配置还是库。
 func Load() (Config, error) {
+	lease, err := envInt("CD_LEASE_SECONDS", 30, false)
+	if err != nil {
+		return Config{}, err
+	}
+	heartbeat, err := envInt("CD_HEARTBEAT_SECONDS", 10, false)
+	if err != nil {
+		return Config{}, err
+	}
+	claimWait, err := envInt("CD_CLAIM_MAX_WAIT_MS", 20000, true)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		PublicAddr:         envDefault("CD_PUBLIC_ADDR", ":7310"),
 		DatabaseURL:        os.Getenv("CD_DATABASE_URL"),
 		MigrateDatabaseURL: os.Getenv("CD_MIGRATE_DATABASE_URL"),
 		APIKey:             os.Getenv("CD_API_KEY"),
 		WorkspacesDir:      envDefault("CD_WORKSPACES_DIR", "./var/workspaces"),
+		InternalAddr:       envDefault("CD_INTERNAL_ADDR", "127.0.0.1:7312"),
+		InternalToken:      os.Getenv("CD_INTERNAL_TOKEN"),
+		LeaseSeconds:       lease,
+		HeartbeatSeconds:   heartbeat,
+		ClaimMaxWaitMS:     claimWait,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("缺环境变量 CD_DATABASE_URL")
@@ -31,6 +54,9 @@ func Load() (Config, error) {
 	if cfg.APIKey == "" {
 		return Config{}, fmt.Errorf("缺环境变量 CD_API_KEY")
 	}
+	if cfg.InternalToken == "" {
+		return Config{}, fmt.Errorf("缺环境变量 CD_INTERNAL_TOKEN")
+	}
 	return cfg, nil
 }
 
@@ -40,4 +66,16 @@ func envDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envInt(key string, fallback int, allowZero bool) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || (n == 0 && !allowZero) {
+		return 0, fmt.Errorf("环境变量 %s 不合法", key)
+	}
+	return n, nil
 }

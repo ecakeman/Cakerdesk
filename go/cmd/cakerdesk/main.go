@@ -67,7 +67,13 @@ func runAPI() error {
 		return err
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	parsed, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	// 领取的等待在事务外面。这里把池子放到 20，避免多个内核同时长轮询时把默认的几条连接用完。
+	parsed.MaxConns = 20
+	pool, err := pgxpool.NewWithConfig(ctx, parsed)
 	if err != nil {
 		return err
 	}
@@ -75,27 +81,41 @@ func runAPI() error {
 	if err := pool.Ping(ctx); err != nil {
 		return err
 	}
-	srv := &http.Server{
-		Addr:    cfg.PublicAddr,
-		Handler: api.New(pool, cfg.APIKey, cfg.WorkspacesDir).Public,
-	}
+	app := api.New(pool, api.Options{
+		APIKey:           cfg.APIKey,
+		WorkspacesDir:    cfg.WorkspacesDir,
+		InternalToken:    cfg.InternalToken,
+		LeaseSeconds:     cfg.LeaseSeconds,
+		HeartbeatSeconds: cfg.HeartbeatSeconds,
+		ClaimMaxWait:     time.Duration(cfg.ClaimMaxWaitMS) * time.Millisecond,
+	})
+	pub := &http.Server{Addr: cfg.PublicAddr, Handler: app.Public}
+	internal := &http.Server{Addr: cfg.InternalAddr, Handler: app.Internal}
 	// Listen 放进 goroutine，主协程才能接到 SIGINT 再 Shutdown。
 	// 5 秒到了还关不掉就返回错误，避免连接不放时进程一直挂着。
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
-		errCh <- srv.ListenAndServe()
+		errCh <- pub.ListenAndServe()
 	}()
+	go func() {
+		errCh <- internal.ListenAndServe()
+	}()
+	var runErr error
 	select {
 	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = err
 		}
-		return err
 	case <-sigCtx.Done():
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	errPub := pub.Shutdown(shutdownCtx)
+	errIn := internal.Shutdown(shutdownCtx)
+	if runErr != nil {
+		return runErr
+	}
+	return errors.Join(errPub, errIn)
 }

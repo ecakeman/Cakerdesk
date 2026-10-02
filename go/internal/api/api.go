@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ecakeman/cakerdesk/internal/agents"
 	"github.com/ecakeman/cakerdesk/internal/apperr"
 	"github.com/ecakeman/cakerdesk/internal/httpx"
+	"github.com/ecakeman/cakerdesk/internal/runs"
 	"github.com/ecakeman/cakerdesk/internal/sessions"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -22,15 +24,28 @@ type Server struct {
 	pool     *pgxpool.Pool
 	agents   *agents.Service
 	sessions *sessions.Service
+	runs     *runs.Service
 	apiKey   string
+	internal string
 }
 
-func New(pool *pgxpool.Pool, apiKey, workspaces string) *Server {
+type Options struct {
+	APIKey           string
+	WorkspacesDir    string
+	InternalToken    string
+	LeaseSeconds     int
+	HeartbeatSeconds int
+	ClaimMaxWait     time.Duration
+}
+
+func New(pool *pgxpool.Pool, opt Options) *Server {
 	s := &Server{
 		pool:     pool,
 		agents:   agents.NewService(pool),
-		sessions: sessions.NewService(pool, workspaces),
-		apiKey:   apiKey,
+		sessions: sessions.NewService(pool, opt.WorkspacesDir),
+		runs:     runs.NewService(pool, opt.LeaseSeconds, opt.HeartbeatSeconds, opt.ClaimMaxWait),
+		apiKey:   opt.APIKey,
+		internal: opt.InternalToken,
 	}
 	gin.SetMode(gin.ReleaseMode)
 	pub := gin.New()
@@ -48,9 +63,11 @@ func New(pool *pgxpool.Pool, apiKey, workspaces string) *Server {
 	v1.GET("/sessions/:id/runs", s.listRuns)
 	v1.GET("/runs/:id", s.getRun)
 	v1.GET("/runs/:id/config", s.getRunConfig)
-	// Internal 先建好但不 Listen。现在绑上会变成没有内部钥匙的端口。
 	internal := gin.New()
-	internal.Use(gin.Recovery())
+	internal.Use(httpx.RequestLog(), gin.Recovery())
+	in := internal.Group("/internal", s.requireInternal)
+	in.POST("/runs/claim", s.claimRun)
+	in.POST("/runs/:id/complete", s.completeRun)
 	s.Public = pub
 	s.Internal = internal
 	return s
@@ -66,13 +83,26 @@ func (s *Server) healthz(c *gin.Context) {
 }
 
 func (s *Server) requireKey(c *gin.Context) {
+	if !bearerOK(c.GetHeader("Authorization"), s.apiKey) {
+		httpx.WriteError(c, apperr.New(http.StatusUnauthorized, "unauthorized", "未授权"))
+	}
+}
+
+func (s *Server) requireInternal(c *gin.Context) {
+	// 公共 API Key 不能领 Run。内部端口只认这一把钥匙。
+	if !bearerOK(c.GetHeader("Authorization"), s.internal) {
+		httpx.WriteError(c, apperr.New(http.StatusUnauthorized, "unauthorized", "未授权"))
+	}
+}
+
+func bearerOK(header, key string) bool {
 	// 没有 "Bearer " 前缀时 TrimPrefix 原样返回，下面当成没带钥匙。
 	// hmac.Equal 不因长度提前返回，避免用耗时猜钥匙。
-	got := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
-	if got == c.GetHeader("Authorization") || !hmac.Equal([]byte(got), []byte(s.apiKey)) {
-		httpx.WriteError(c, apperr.New(http.StatusUnauthorized, "unauthorized", "未授权"))
-		return
+	got := strings.TrimPrefix(header, "Bearer ")
+	if got == header || key == "" {
+		return false
 	}
+	return hmac.Equal([]byte(got), []byte(key))
 }
 
 func (s *Server) createAgent(c *gin.Context) {
@@ -158,6 +188,76 @@ func (s *Server) getVersion(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, versionJSON(ver))
+}
+
+func (s *Server) claimRun(c *gin.Context) {
+	var req struct {
+		WorkerID string `json:"worker_id"`
+		WaitMS   int    `json:"wait_ms"`
+	}
+	if err := httpx.BindJSON(c, &req); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	claim, ok, err := s.runs.Claim(c.Request.Context(), req.WorkerID, req.WaitMS)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	if !ok {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"run_id":            claim.RunID.String(),
+		"session_id":        claim.SessionID.String(),
+		"attempt":           claim.Attempt,
+		"input":             claim.Input,
+		"config":            claim.Config,
+		"tools":             claim.Tools,
+		"lease_seconds":     claim.LeaseSeconds,
+		"heartbeat_seconds": claim.HeartbeatSeconds,
+	})
+}
+
+func (s *Server) completeRun(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "run 不存在"))
+		return
+	}
+	var req struct {
+		WorkerID string          `json:"worker_id"`
+		Attempt  int32           `json:"attempt"`
+		Status   string          `json:"status"`
+		Result   json.RawMessage `json:"result"`
+		Error    *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := httpx.BindJSON(c, &req); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	in := runs.CompleteInput{
+		RunID:    id,
+		WorkerID: req.WorkerID,
+		Attempt:  req.Attempt,
+		Status:   req.Status,
+		Result:   req.Result,
+	}
+	if req.Error != nil {
+		in.Error = &struct {
+			Code    string
+			Message string
+		}{Code: req.Error.Code, Message: req.Error.Message}
+	}
+	if err := s.runs.Complete(c.Request.Context(), in); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func agentJSON(a agents.Agent) gin.H {
