@@ -170,7 +170,12 @@ func TestDefaultPrivileges(t *testing.T) {
 
 func newTestServer(t *testing.T, env *dbtest.Env) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(New(env.App, "test-key").Public)
+	return newTestServerIn(t, env, t.TempDir())
+}
+
+func newTestServerIn(t *testing.T, env *dbtest.Env, dir string) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(New(env.App, "test-key", dir).Public)
 	t.Cleanup(ts.Close)
 	return ts
 }

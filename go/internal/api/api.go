@@ -10,6 +10,7 @@ import (
 	"github.com/ecakeman/cakerdesk/internal/agents"
 	"github.com/ecakeman/cakerdesk/internal/apperr"
 	"github.com/ecakeman/cakerdesk/internal/httpx"
+	"github.com/ecakeman/cakerdesk/internal/sessions"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,14 +21,16 @@ type Server struct {
 	Internal *gin.Engine
 	pool     *pgxpool.Pool
 	agents   *agents.Service
+	sessions *sessions.Service
 	apiKey   string
 }
 
-func New(pool *pgxpool.Pool, apiKey string) *Server {
+func New(pool *pgxpool.Pool, apiKey, workspaces string) *Server {
 	s := &Server{
-		pool:   pool,
-		agents: agents.NewService(pool),
-		apiKey: apiKey,
+		pool:     pool,
+		agents:   agents.NewService(pool),
+		sessions: sessions.NewService(pool, workspaces),
+		apiKey:   apiKey,
 	}
 	gin.SetMode(gin.ReleaseMode)
 	pub := gin.New()
@@ -39,6 +42,12 @@ func New(pool *pgxpool.Pool, apiKey string) *Server {
 	v1.GET("/agents/:id", s.getAgent)
 	v1.POST("/agents/:id/versions", s.publishVersion)
 	v1.GET("/agents/:id/versions/:version", s.getVersion)
+	v1.POST("/sessions", s.createSession)
+	v1.GET("/sessions/:id", s.getSession)
+	v1.POST("/sessions/:id/runs", s.createRun)
+	v1.GET("/sessions/:id/runs", s.listRuns)
+	v1.GET("/runs/:id", s.getRun)
+	v1.GET("/runs/:id/config", s.getRunConfig)
 	// Internal 先建好但不 Listen。现在绑上会变成没有内部钥匙的端口。
 	internal := gin.New()
 	internal.Use(gin.Recovery())
@@ -156,6 +165,147 @@ func agentJSON(a agents.Agent) gin.H {
 		"id":              a.ID.String(),
 		"name":            a.Name,
 		"current_version": a.CurrentVersion,
+	}
+}
+
+func (s *Server) createSession(c *gin.Context) {
+	var req struct {
+		AgentID string `json:"agent_id"`
+		Title   string `json:"title"`
+	}
+	if err := httpx.BindJSON(c, &req); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	id, err := uuid.Parse(req.AgentID)
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "agent 不存在"))
+		return
+	}
+	sess, err := s.sessions.Create(c.Request.Context(), id, req.Title)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, sessionJSON(sess))
+}
+
+func (s *Server) getSession(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "session 不存在"))
+		return
+	}
+	sess, err := s.sessions.Get(c.Request.Context(), id)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, sessionJSON(sess))
+}
+
+func (s *Server) createRun(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "session 不存在"))
+		return
+	}
+	var req struct {
+		Input string `json:"input"`
+	}
+	if err := httpx.BindJSON(c, &req); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	run, err := s.sessions.CreateRun(c.Request.Context(), id, req.Input)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, runJSON(run))
+}
+
+func (s *Server) getRun(c *gin.Context) {
+	run, err := s.loadRun(c)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, runJSON(run))
+}
+
+func (s *Server) getRunConfig(c *gin.Context) {
+	run, err := s.loadRun(c)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"config": run.Config})
+}
+
+func (s *Server) listRuns(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "session 不存在"))
+		return
+	}
+	items, err := s.sessions.ListRuns(c.Request.Context(), id)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	out := make([]gin.H, 0, len(items))
+	for _, run := range items {
+		out = append(out, runJSON(run))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) loadRun(c *gin.Context) (sessions.Run, error) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return sessions.Run{}, apperr.New(http.StatusNotFound, "not_found", "run 不存在")
+	}
+	return s.sessions.GetRun(c.Request.Context(), id)
+}
+
+func sessionJSON(sess sessions.Session) gin.H {
+	var active any
+	if sess.ActiveRunID != nil {
+		active = sess.ActiveRunID.String()
+	}
+	return gin.H{
+		"id":            sess.ID.String(),
+		"agent_id":      sess.AgentID.String(),
+		"title":         sess.Title,
+		"created_at":    sess.CreatedAt,
+		"active_run_id": active,
+	}
+}
+
+func runJSON(run sessions.Run) gin.H {
+	var errBody any
+	if run.ErrorCode != nil || run.ErrorMessage != nil {
+		code, msg := "", ""
+		if run.ErrorCode != nil {
+			code = *run.ErrorCode
+		}
+		if run.ErrorMessage != nil {
+			msg = *run.ErrorMessage
+		}
+		errBody = gin.H{"code": code, "message": msg}
+	}
+	return gin.H{
+		"id":            run.ID.String(),
+		"session_id":    run.SessionID.String(),
+		"agent_version": run.AgentVersion,
+		"status":        run.Status,
+		"attempt":       run.Attempt,
+		"result":        run.Result,
+		"error":         errBody,
+		"created_at":    run.CreatedAt,
+		"started_at":    run.StartedAt,
+		"finished_at":   run.FinishedAt,
 	}
 }
 

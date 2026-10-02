@@ -77,7 +77,7 @@ func runAPI() error {
 	}
 	srv := &http.Server{
 		Addr:    cfg.PublicAddr,
-		Handler: api.New(pool, cfg.APIKey).Public,
+		Handler: api.New(pool, cfg.APIKey, cfg.WorkspacesDir).Public,
 	}
 	// Listen 放进 goroutine，主协程才能接到 SIGINT 再 Shutdown。
 	// 5 秒到了还关不掉就返回错误，避免连接不放时进程一直挂着。

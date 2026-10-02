@@ -13,6 +13,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const activeRunID = `-- name: ActiveRunID :one
+SELECT id
+FROM runs
+WHERE session_id = $1 AND status IN ('queued', 'running')
+`
+
+func (q *Queries) ActiveRunID(ctx context.Context, sessionID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, activeRunID, sessionID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const createAgent = `-- name: CreateAgent :one
 INSERT INTO agents (name)
 VALUES ($1)
@@ -95,6 +108,72 @@ func (q *Queries) GetCurrentAgentVersion(ctx context.Context, id uuid.UUID) (Age
 	return i, err
 }
 
+const getRun = `-- name: GetRun :one
+SELECT id, session_id, agent_id, agent_version, config, input, status, attempt,
+    max_attempts, result, error_code, error_message, created_at, started_at, finished_at
+FROM runs
+WHERE id = $1
+`
+
+type GetRunRow struct {
+	ID           uuid.UUID
+	SessionID    uuid.UUID
+	AgentID      uuid.UUID
+	AgentVersion int32
+	Config       json.RawMessage
+	Input        string
+	Status       string
+	Attempt      int32
+	MaxAttempts  int32
+	Result       []byte
+	ErrorCode    pgtype.Text
+	ErrorMessage pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+	StartedAt    pgtype.Timestamptz
+	FinishedAt   pgtype.Timestamptz
+}
+
+func (q *Queries) GetRun(ctx context.Context, id uuid.UUID) (GetRunRow, error) {
+	row := q.db.QueryRow(ctx, getRun, id)
+	var i GetRunRow
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.AgentID,
+		&i.AgentVersion,
+		&i.Config,
+		&i.Input,
+		&i.Status,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.Result,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const getSession = `-- name: GetSession :one
+SELECT id, agent_id, title, created_at
+FROM sessions
+WHERE id = $1
+`
+
+func (q *Queries) GetSession(ctx context.Context, id uuid.UUID) (Session, error) {
+	row := q.db.QueryRow(ctx, getSession, id)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.Title,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertAgentVersion = `-- name: InsertAgentVersion :one
 INSERT INTO agent_versions (agent_id, version, config, config_hash)
 VALUES ($1, $2, $3, $4)
@@ -126,6 +205,93 @@ func (q *Queries) InsertAgentVersion(ctx context.Context, arg InsertAgentVersion
 	return i, err
 }
 
+const insertRun = `-- name: InsertRun :one
+INSERT INTO runs (session_id, agent_id, agent_version, config, input, max_attempts)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, session_id, agent_id, agent_version, config, input, status, attempt,
+    max_attempts, result, error_code, error_message, created_at, started_at, finished_at
+`
+
+type InsertRunParams struct {
+	SessionID    uuid.UUID
+	AgentID      uuid.UUID
+	AgentVersion int32
+	Config       json.RawMessage
+	Input        string
+	MaxAttempts  int32
+}
+
+type InsertRunRow struct {
+	ID           uuid.UUID
+	SessionID    uuid.UUID
+	AgentID      uuid.UUID
+	AgentVersion int32
+	Config       json.RawMessage
+	Input        string
+	Status       string
+	Attempt      int32
+	MaxAttempts  int32
+	Result       []byte
+	ErrorCode    pgtype.Text
+	ErrorMessage pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+	StartedAt    pgtype.Timestamptz
+	FinishedAt   pgtype.Timestamptz
+}
+
+func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (InsertRunRow, error) {
+	row := q.db.QueryRow(ctx, insertRun,
+		arg.SessionID,
+		arg.AgentID,
+		arg.AgentVersion,
+		arg.Config,
+		arg.Input,
+		arg.MaxAttempts,
+	)
+	var i InsertRunRow
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.AgentID,
+		&i.AgentVersion,
+		&i.Config,
+		&i.Input,
+		&i.Status,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.Result,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const insertSession = `-- name: InsertSession :one
+INSERT INTO sessions (agent_id, title)
+VALUES ($1, $2)
+RETURNING id, agent_id, title, created_at
+`
+
+type InsertSessionParams struct {
+	AgentID uuid.UUID
+	Title   string
+}
+
+func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) (Session, error) {
+	row := q.db.QueryRow(ctx, insertSession, arg.AgentID, arg.Title)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.Title,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listAgents = `-- name: ListAgents :many
 SELECT id, name, current_version, created_at, updated_at
 FROM agents
@@ -148,6 +314,69 @@ func (q *Queries) ListAgents(ctx context.Context) ([]Agent, error) {
 			&i.CurrentVersion,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunsBySession = `-- name: ListRunsBySession :many
+SELECT id, session_id, agent_id, agent_version, config, input, status, attempt,
+    max_attempts, result, error_code, error_message, created_at, started_at, finished_at
+FROM runs
+WHERE session_id = $1
+ORDER BY created_at DESC
+LIMIT 200
+`
+
+type ListRunsBySessionRow struct {
+	ID           uuid.UUID
+	SessionID    uuid.UUID
+	AgentID      uuid.UUID
+	AgentVersion int32
+	Config       json.RawMessage
+	Input        string
+	Status       string
+	Attempt      int32
+	MaxAttempts  int32
+	Result       []byte
+	ErrorCode    pgtype.Text
+	ErrorMessage pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+	StartedAt    pgtype.Timestamptz
+	FinishedAt   pgtype.Timestamptz
+}
+
+func (q *Queries) ListRunsBySession(ctx context.Context, sessionID uuid.UUID) ([]ListRunsBySessionRow, error) {
+	rows, err := q.db.Query(ctx, listRunsBySession, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRunsBySessionRow
+	for rows.Next() {
+		var i ListRunsBySessionRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.AgentID,
+			&i.AgentVersion,
+			&i.Config,
+			&i.Input,
+			&i.Status,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.Result,
+			&i.ErrorCode,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
 		); err != nil {
 			return nil, err
 		}

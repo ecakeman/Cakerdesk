@@ -26,3 +26,31 @@ type AgentVersion struct {
 	ConfigHash string
 	CreatedAt  pgtype.Timestamptz
 }
+
+type Run struct {
+	ID             uuid.UUID
+	SessionID      uuid.UUID
+	AgentID        uuid.UUID
+	AgentVersion   int32
+	Config         json.RawMessage
+	Input          string
+	Status         string
+	Attempt        int32
+	MaxAttempts    int32
+	LeaseOwner     pgtype.Text
+	LeaseExpiresAt pgtype.Timestamptz
+	Result         []byte
+	ErrorCode      pgtype.Text
+	ErrorMessage   pgtype.Text
+	CreatedAt      pgtype.Timestamptz
+	StartedAt      pgtype.Timestamptz
+	FinishedAt     pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}
+
+type Session struct {
+	ID        uuid.UUID
+	AgentID   uuid.UUID
+	Title     string
+	CreatedAt pgtype.Timestamptz
+}

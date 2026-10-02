@@ -10,6 +10,7 @@ type Config struct {
 	DatabaseURL        string
 	MigrateDatabaseURL string
 	APIKey             string
+	WorkspacesDir      string
 }
 
 // 缺数据库 URL 或 API Key 直接启动失败。空着等到第一条请求才爆，分不清是配置还是库。
@@ -19,6 +20,7 @@ func Load() (Config, error) {
 		DatabaseURL:        os.Getenv("CD_DATABASE_URL"),
 		MigrateDatabaseURL: os.Getenv("CD_MIGRATE_DATABASE_URL"),
 		APIKey:             os.Getenv("CD_API_KEY"),
+		WorkspacesDir:      envDefault("CD_WORKSPACES_DIR", "./var/workspaces"),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("缺环境变量 CD_DATABASE_URL")
