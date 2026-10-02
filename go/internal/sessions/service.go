@@ -11,6 +11,7 @@ import (
 
 	"github.com/ecakeman/cakerdesk/internal/agents"
 	"github.com/ecakeman/cakerdesk/internal/apperr"
+	"github.com/ecakeman/cakerdesk/internal/events"
 	"github.com/ecakeman/cakerdesk/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -23,10 +24,11 @@ type Service struct {
 	pool       *pgxpool.Pool
 	q          *store.Queries
 	workspaces string
+	events     *events.Service
 }
 
-func NewService(pool *pgxpool.Pool, workspaces string) *Service {
-	return &Service{pool: pool, q: store.New(pool), workspaces: workspaces}
+func NewService(pool *pgxpool.Pool, workspaces string, ev *events.Service) *Service {
+	return &Service{pool: pool, q: store.New(pool), workspaces: workspaces, events: ev}
 }
 
 type Session struct {
@@ -132,8 +134,13 @@ func (s *Service) CreateRun(ctx context.Context, sessionID uuid.UUID, input stri
 	if err != nil {
 		return Run{}, err
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Rollback(ctx)
 	// 不先查再插。两个请求会同时看到「没有活跃 Run」。唯一索引冲突才表示忙。
-	row, err := s.q.InsertRun(ctx, store.InsertRunParams{
+	row, err := s.q.WithTx(tx).InsertRun(ctx, store.InsertRunParams{
 		SessionID:    sessionID,
 		AgentID:      sess.AgentID,
 		AgentVersion: ver.Version,
@@ -147,6 +154,22 @@ func (s *Service) CreateRun(ctx context.Context, sessionID uuid.UUID, input stri
 		}
 		return Run{}, err
 	}
+	payload, err := json.Marshal(map[string]any{"agent_version": ver.Version})
+	if err != nil {
+		return Run{}, err
+	}
+	_, last, err := s.events.AppendTx(ctx, tx, row.ID, []events.Event{{
+		Type:    "run.queued",
+		Attempt: row.Attempt,
+		Payload: payload,
+	}}, nil)
+	if err != nil {
+		return Run{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, err
+	}
+	s.events.Publish(row.ID, last)
 	return runFromInsert(row), nil
 }
 

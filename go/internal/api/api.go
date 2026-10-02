@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/hmac"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ecakeman/cakerdesk/internal/agents"
 	"github.com/ecakeman/cakerdesk/internal/apperr"
+	"github.com/ecakeman/cakerdesk/internal/events"
 	"github.com/ecakeman/cakerdesk/internal/httpx"
 	"github.com/ecakeman/cakerdesk/internal/runs"
 	"github.com/ecakeman/cakerdesk/internal/sessions"
@@ -25,6 +27,7 @@ type Server struct {
 	agents   *agents.Service
 	sessions *sessions.Service
 	runs     *runs.Service
+	events   *events.Service
 	apiKey   string
 	internal string
 }
@@ -36,14 +39,17 @@ type Options struct {
 	LeaseSeconds     int
 	HeartbeatSeconds int
 	ClaimMaxWait     time.Duration
+	RedisURL         string
 }
 
 func New(pool *pgxpool.Pool, opt Options) *Server {
+	ev := events.New(pool, opt.RedisURL)
 	s := &Server{
 		pool:     pool,
 		agents:   agents.NewService(pool),
-		sessions: sessions.NewService(pool, opt.WorkspacesDir),
-		runs:     runs.NewService(pool, opt.LeaseSeconds, opt.HeartbeatSeconds, opt.ClaimMaxWait),
+		sessions: sessions.NewService(pool, opt.WorkspacesDir, ev),
+		runs:     runs.NewService(pool, ev, opt.LeaseSeconds, opt.HeartbeatSeconds, opt.ClaimMaxWait),
+		events:   ev,
 		apiKey:   opt.APIKey,
 		internal: opt.InternalToken,
 	}
@@ -63,12 +69,15 @@ func New(pool *pgxpool.Pool, opt Options) *Server {
 	v1.GET("/sessions/:id/runs", s.listRuns)
 	v1.GET("/runs/:id", s.getRun)
 	v1.GET("/runs/:id/config", s.getRunConfig)
+	v1.GET("/runs/:id/events", s.listEvents)
+	v1.GET("/runs/:id/events/stream", s.streamEvents)
 	internal := gin.New()
 	internal.Use(httpx.RequestLog(), gin.Recovery())
 	in := internal.Group("/internal", s.requireInternal)
 	in.POST("/runs/claim", s.claimRun)
 	in.POST("/runs/:id/complete", s.completeRun)
 	in.POST("/runs/:id/tool-calls", s.toolCall)
+	in.POST("/runs/:id/events", s.postEvents)
 	s.Public = pub
 	s.Internal = internal
 	return s
@@ -289,6 +298,117 @@ func (s *Server) toolCall(c *gin.Context) {
 		body["error_code"] = out.ErrorCode
 	}
 	c.JSON(http.StatusOK, body)
+}
+
+func (s *Server) listEvents(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "run 不存在"))
+		return
+	}
+	if _, err := s.sessions.GetRun(c.Request.Context(), id); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	after, _ := strconv.ParseInt(c.DefaultQuery("after_seq", "0"), 10, 64)
+	if after < 0 {
+		after = 0
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
+	rows, err := s.events.List(c.Request.Context(), id, after, limit)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	items := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, gin.H{
+			"seq":     row.Seq,
+			"type":    row.Type,
+			"attempt": row.Attempt,
+			"payload": row.Payload,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) streamEvents(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "run 不存在"))
+		return
+	}
+	if _, err := s.sessions.GetRun(c.Request.Context(), id); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	last, err := streamCursor(c)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	if err := s.events.Stream(c.Request.Context(), c.Writer, id, last); err != nil {
+		slog.Error("sse", "err", err.Error())
+	}
+}
+
+func streamCursor(c *gin.Context) (int64, error) {
+	if h := c.GetHeader("Last-Event-ID"); h != "" {
+		n, err := strconv.ParseInt(h, 10, 64)
+		if err != nil || n < 0 {
+			return 0, apperr.New(http.StatusBadRequest, "invalid_request", "Last-Event-ID")
+		}
+		return n, nil
+	}
+	if q := c.Query("after_seq"); q != "" {
+		n, err := strconv.ParseInt(q, 10, 64)
+		if err != nil || n < 0 {
+			return 0, apperr.New(http.StatusBadRequest, "invalid_request", "after_seq")
+		}
+		return n, nil
+	}
+	return 0, nil
+}
+
+func (s *Server) postEvents(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "run 不存在"))
+		return
+	}
+	var req struct {
+		WorkerID string `json:"worker_id"`
+		Attempt  int32  `json:"attempt"`
+		Events   []struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		} `json:"events"`
+	}
+	if err := httpx.BindJSON(c, &req); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	if req.WorkerID == "" {
+		httpx.WriteError(c, apperr.New(http.StatusBadRequest, "invalid_request", "worker_id"))
+		return
+	}
+	evs := make([]events.Event, len(req.Events))
+	for i, ev := range req.Events {
+		evs[i] = events.Event{Type: ev.Type, Attempt: req.Attempt, Payload: ev.Payload}
+	}
+	if err := events.CheckKernel(evs); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	first, last, err := s.events.Append(c.Request.Context(), id, evs, &events.Fence{
+		WorkerID: req.WorkerID,
+		Attempt:  req.Attempt,
+	})
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"first_seq": first, "last_seq": last})
 }
 
 func agentJSON(a agents.Agent) gin.H {

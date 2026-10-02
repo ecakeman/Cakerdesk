@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ecakeman/cakerdesk/internal/apperr"
+	"github.com/ecakeman/cakerdesk/internal/events"
 	"github.com/ecakeman/cakerdesk/internal/store"
 	"github.com/ecakeman/cakerdesk/internal/tools"
 	"github.com/google/uuid"
@@ -21,15 +22,17 @@ import (
 type Service struct {
 	pool             *pgxpool.Pool
 	q                *store.Queries
+	events           *events.Service
 	leaseSeconds     int32
 	heartbeatSeconds int32
 	claimMaxWait     time.Duration
 }
 
-func NewService(pool *pgxpool.Pool, leaseSeconds, heartbeatSeconds int, claimMaxWait time.Duration) *Service {
+func NewService(pool *pgxpool.Pool, ev *events.Service, leaseSeconds, heartbeatSeconds int, claimMaxWait time.Duration) *Service {
 	return &Service{
 		pool:             pool,
 		q:                store.New(pool),
+		events:           ev,
 		leaseSeconds:     int32(leaseSeconds),
 		heartbeatSeconds: int32(heartbeatSeconds),
 		claimMaxWait:     claimMaxWait,
@@ -66,19 +69,12 @@ func (s *Service) Claim(ctx context.Context, workerID string, waitMS int) (Claim
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		row, err := s.q.ClaimRun(ctx, store.ClaimRunParams{
-			LeaseOwner:   pgtype.Text{String: workerID, Valid: true},
-			LeaseSeconds: s.leaseSeconds,
-		})
-		if err == nil {
-			claim, err := s.claimFrom(row)
-			if err != nil {
-				return Claim{}, false, err
-			}
-			return claim, true, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		row, ok, err := s.claimOnce(ctx, workerID)
+		if err != nil {
 			return Claim{}, false, err
+		}
+		if ok {
+			return row, true, nil
 		}
 		// 睡的时候不能占着事务。长事务会把连接和快照一直留到 wait 结束。
 		remain := time.Until(deadline)
@@ -97,6 +93,46 @@ func (s *Service) Claim(ctx context.Context, workerID string, waitMS int) (Claim
 		case <-timer.C:
 		}
 	}
+}
+
+// started 必须和领取在同一个事务里。分开提交的话，状态已经是 running，事件里还没有这次领取。
+func (s *Service) claimOnce(ctx context.Context, workerID string) (Claim, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Claim{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := s.q.WithTx(tx).ClaimRun(ctx, store.ClaimRunParams{
+		LeaseOwner:   pgtype.Text{String: workerID, Valid: true},
+		LeaseSeconds: s.leaseSeconds,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Claim{}, false, nil
+	}
+	if err != nil {
+		return Claim{}, false, err
+	}
+	payload, err := json.Marshal(map[string]any{"attempt": row.Attempt, "worker_id": workerID})
+	if err != nil {
+		return Claim{}, false, err
+	}
+	_, last, err := s.events.AppendTx(ctx, tx, row.ID, []events.Event{{
+		Type:    "run.started",
+		Attempt: row.Attempt,
+		Payload: payload,
+	}}, &events.Fence{WorkerID: workerID, Attempt: row.Attempt})
+	if err != nil {
+		return Claim{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Claim{}, false, err
+	}
+	s.events.Publish(row.ID, last)
+	claim, err := s.claimFrom(row)
+	if err != nil {
+		return Claim{}, false, err
+	}
+	return claim, true, nil
 }
 
 type CompleteInput struct {
@@ -126,8 +162,13 @@ func (s *Service) Complete(ctx context.Context, in CompleteInput) error {
 		errCode = pgtype.Text{String: in.Error.Code, Valid: true}
 		errMsg = pgtype.Text{String: in.Error.Message, Valid: true}
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
 	// id、attempt、lease_owner、running 四个条件少一个，旧 worker 仍能把 Run 标完成。
-	n, err := s.q.CompleteRun(ctx, store.CompleteRunParams{
+	n, err := s.q.WithTx(tx).CompleteRun(ctx, store.CompleteRunParams{
 		Status:       in.Status,
 		Result:       result,
 		ErrorCode:    errCode,
@@ -142,6 +183,37 @@ func (s *Service) Complete(ctx context.Context, in CompleteInput) error {
 	if n == 0 {
 		return apperr.New(http.StatusConflict, "lease_lost", "租约条件不成立")
 	}
+	// 完成后 status 不再是 running，fence 会配不上。终态事件跟这次更新同一事务，但不带 fence。
+	ev := events.Event{Type: "run.succeeded", Attempt: in.Attempt}
+	if in.Status == "succeeded" {
+		payload, err := json.Marshal(map[string]any{"result": json.RawMessage(result)})
+		if err != nil {
+			return err
+		}
+		if len(result) == 0 {
+			payload = []byte(`{"result":null}`)
+		}
+		ev.Payload = payload
+	} else {
+		code, msg := "", ""
+		if in.Error != nil {
+			code, msg = in.Error.Code, in.Error.Message
+		}
+		payload, err := json.Marshal(map[string]any{"code": code, "message": msg})
+		if err != nil {
+			return err
+		}
+		ev.Type = "run.failed"
+		ev.Payload = payload
+	}
+	_, last, err := s.events.AppendTx(ctx, tx, in.RunID, []events.Event{ev}, nil)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.events.Publish(in.RunID, last)
 	return nil
 }
 
@@ -172,11 +244,52 @@ func (s *Service) ToolCall(ctx context.Context, runID uuid.UUID, workerID string
 	if err != nil {
 		return ToolOutput{}, err
 	}
+	startedAt := time.Now()
 	out := executeTool(row, name, args)
+	payloadArgs := args
+	if len(payloadArgs) == 0 {
+		payloadArgs = []byte("{}")
+	}
+	started, err := json.Marshal(map[string]any{
+		"tool_call_id": toolCallID,
+		"name":         name,
+		"args":         json.RawMessage(payloadArgs),
+	})
+	if err != nil {
+		return ToolOutput{}, err
+	}
+	finished, err := json.Marshal(map[string]any{
+		"tool_call_id":   toolCallID,
+		"status":         out.Status,
+		"replayed":       false,
+		"exec_count":     1,
+		"duration_ms":    time.Since(startedAt).Milliseconds(),
+		"output_preview": preview(out.Output),
+	})
+	if err != nil {
+		return ToolOutput{}, err
+	}
+	// 调用记录要到 D1 才落库。这里还没有重放，exec_count 就是 1。
+	_, last, err := s.events.AppendTx(ctx, tx, runID, []events.Event{
+		{Type: "tool.started", Attempt: attempt, Payload: started},
+		{Type: "tool.finished", Attempt: attempt, Payload: finished},
+	}, &events.Fence{WorkerID: workerID, Attempt: attempt})
+	if err != nil {
+		return ToolOutput{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return ToolOutput{}, err
 	}
+	s.events.Publish(runID, last)
 	return out, nil
+}
+
+func preview(s string) string {
+	r := []rune(s)
+	if len(r) > 200 {
+		return string(r[:200])
+	}
+	return s
 }
 
 func executeTool(config json.RawMessage, name string, args json.RawMessage) ToolOutput {

@@ -198,6 +198,7 @@ func newTestPair(t *testing.T, env *dbtest.Env) (pub, internal *httptest.Server)
 		LeaseSeconds:     30,
 		HeartbeatSeconds: 10,
 		ClaimMaxWait:     20 * time.Second,
+		RedisURL:         "redis://127.0.0.1:7341/0",
 	})
 	pub = httptest.NewServer(app.Public)
 	internal = httptest.NewServer(app.Internal)

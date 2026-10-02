@@ -14,6 +14,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from cd_kernel.events import assistant_payload, sink_for
+
 
 class State(TypedDict):
     messages: Annotated[list[Any], add_messages]
@@ -78,11 +80,18 @@ async def agent(state: State, config: RunnableConfig) -> dict:
             ]
         )
     message = await llm.ainvoke(state["messages"])
+    sink = sink_for(config)
+    if sink is not None:
+        await sink.add({"type": "message.assistant", "payload": assistant_payload(message)})
     return {"messages": [message]}
 
 
 async def tools(state: State, config: RunnableConfig) -> dict:
     conf = config.get("configurable") or {}
+    # 先把 assistant 事件写出去，否则 tool.started 会排到它前面。
+    sink = sink_for(config)
+    if sink is not None:
+        await sink.flush()
     last = state["messages"][-1]
     messages = []
     result = None

@@ -183,6 +183,7 @@ func newTestServerIn(t *testing.T, env *dbtest.Env, dir string) *httptest.Server
 		LeaseSeconds:     30,
 		HeartbeatSeconds: 10,
 		ClaimMaxWait:     20 * time.Second,
+		RedisURL:         "redis://127.0.0.1:7341/0",
 	}).Public)
 	t.Cleanup(ts.Close)
 	return ts

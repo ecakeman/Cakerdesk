@@ -88,6 +88,7 @@ func runAPI() error {
 		LeaseSeconds:     cfg.LeaseSeconds,
 		HeartbeatSeconds: cfg.HeartbeatSeconds,
 		ClaimMaxWait:     time.Duration(cfg.ClaimMaxWaitMS) * time.Millisecond,
+		RedisURL:         cfg.RedisURL,
 	})
 	pub := &http.Server{Addr: cfg.PublicAddr, Handler: app.Public}
 	internal := &http.Server{Addr: cfg.InternalAddr, Handler: app.Internal}

@@ -17,6 +17,7 @@ type Config struct {
 	LeaseSeconds       int
 	HeartbeatSeconds   int
 	ClaimMaxWaitMS     int
+	RedisURL           string
 }
 
 // 缺数据库 URL、API Key 或内部钥匙直接启动失败。空着等到第一条请求才爆，分不清是配置还是库。
@@ -44,6 +45,7 @@ func Load() (Config, error) {
 		LeaseSeconds:       lease,
 		HeartbeatSeconds:   heartbeat,
 		ClaimMaxWaitMS:     claimWait,
+		RedisURL:           envDefault("CD_REDIS_URL", "redis://127.0.0.1:7341/0"),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("缺环境变量 CD_DATABASE_URL")

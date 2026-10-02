@@ -9,6 +9,7 @@ import httpx
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from cd_kernel.checkpoint import setup_tables
+from cd_kernel.events import EventSink, bind, unbind
 from cd_kernel.graph import build_graph, first_input
 
 
@@ -65,6 +66,12 @@ async def take(client: httpx.AsyncClient, api: str, token: str, worker_id: str) 
 async def execute(graph, client, api: str, token: str, worker_id: str, claim: dict) -> None:
     run_id = claim["run_id"]
     attempt = claim["attempt"]
+    flush_ms = int(os.environ.get("CD_EVENT_FLUSH_MS") or "500")
+    batch = int(os.environ.get("CD_EVENT_BATCH") or "20")
+    sink = EventSink(client, api, token, worker_id, attempt, run_id, batch)
+    bind(run_id, sink)
+    stop = asyncio.Event()
+    task = asyncio.create_task(sink.run(stop, flush_ms))
     cfg = {
         "configurable": {
             "thread_id": run_id,
@@ -87,13 +94,23 @@ async def execute(graph, client, api: str, token: str, worker_id: str, claim: di
             final = await graph.ainvoke(first_input(prompt, claim["input"]), cfg)
     # 图抛出来的类型不固定。不接住的话 Run 停在 running，这个进程也不再领下一个。
     except Exception as exc:  # noqa: BLE001
+        await _drain(stop, task, sink)
+        unbind(run_id)
         await finish(client, api, token, worker_id, run_id, attempt, None, "kernel_error", str(exc))
         return
+    await _drain(stop, task, sink)
+    unbind(run_id)
     if final.get("result") is not None:
         await finish(client, api, token, worker_id, run_id, attempt, final["result"], None, None)
         return
     code = final.get("failure") or "no_result"
     await finish(client, api, token, worker_id, run_id, attempt, None, code, "没有调用 submit_result")
+
+
+async def _drain(stop: asyncio.Event, task: asyncio.Task, sink: EventSink) -> None:
+    stop.set()
+    await task
+    await sink.flush()
 
 
 async def finish(client, api, token, worker_id, run_id, attempt, result, code, message) -> None:
