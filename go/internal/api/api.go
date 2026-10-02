@@ -68,6 +68,7 @@ func New(pool *pgxpool.Pool, opt Options) *Server {
 	in := internal.Group("/internal", s.requireInternal)
 	in.POST("/runs/claim", s.claimRun)
 	in.POST("/runs/:id/complete", s.completeRun)
+	in.POST("/runs/:id/tool-calls", s.toolCall)
 	s.Public = pub
 	s.Internal = internal
 	return s
@@ -258,6 +259,36 @@ func (s *Server) completeRun(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) toolCall(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteError(c, apperr.New(http.StatusNotFound, "not_found", "run 不存在"))
+		return
+	}
+	var req struct {
+		WorkerID   string          `json:"worker_id"`
+		Attempt    int32           `json:"attempt"`
+		ToolCallID string          `json:"tool_call_id"`
+		Name       string          `json:"name"`
+		Args       json.RawMessage `json:"args"`
+	}
+	if err := httpx.BindJSON(c, &req); err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	// 参数不合法也是 200。内核要把它写成 tool 消息再让模型改口，不是租约失败。
+	out, err := s.runs.ToolCall(c.Request.Context(), id, req.WorkerID, req.Attempt, req.ToolCallID, req.Name, req.Args)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	body := gin.H{"status": out.Status, "output": out.Output, "replayed": false}
+	if out.ErrorCode != "" {
+		body["error_code"] = out.ErrorCode
+	}
+	c.JSON(http.StatusOK, body)
 }
 
 func agentJSON(a agents.Agent) gin.H {

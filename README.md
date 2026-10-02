@@ -23,7 +23,7 @@ Go 1.25、Gin v1.10.1、pgx v5、goose v3、sqlc 生成 `internal/store`。Mock 
 - [x] A3 Mock LLM
 - [x] B1 Session / Run 入队
 - [x] B2 Claim
-- [ ] B3 LangGraph kernel
+- [x] B3 LangGraph kernel
 - [ ] B4 事件与 SSE
 - [ ] C1 租约与心跳
 - [ ] C2 Reaper 与恢复

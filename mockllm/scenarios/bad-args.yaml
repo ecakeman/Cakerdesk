@@ -1,0 +1,6 @@
+name: bad-args
+steps:
+  - tool_calls:
+      - {name: submit_result, args: {}}
+  - tool_calls:
+      - {name: submit_result, args: {summary: "recovered"}}

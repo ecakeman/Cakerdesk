@@ -6,7 +6,13 @@ authors = [
     { name = "sancho", email = "249424373@qq.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.28,<1",
+    "langchain-openai>=0.3,<2",
+    "langgraph>=1.0,<1.1",
+    "langgraph-checkpoint-postgres>=2.0.21,<3",
+    "psycopg[binary]>=3.2,<4",
+]
 
 [project.scripts]
 cd-kernel = "cd_kernel.worker:main"
@@ -20,6 +26,10 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.9",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [tool.ruff]
 line-length = 100

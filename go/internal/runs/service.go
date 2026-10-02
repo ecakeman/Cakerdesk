@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/ecakeman/cakerdesk/internal/apperr"
@@ -18,6 +19,7 @@ import (
 )
 
 type Service struct {
+	pool             *pgxpool.Pool
 	q                *store.Queries
 	leaseSeconds     int32
 	heartbeatSeconds int32
@@ -26,6 +28,7 @@ type Service struct {
 
 func NewService(pool *pgxpool.Pool, leaseSeconds, heartbeatSeconds int, claimMaxWait time.Duration) *Service {
 	return &Service{
+		pool:             pool,
 		q:                store.New(pool),
 		leaseSeconds:     int32(leaseSeconds),
 		heartbeatSeconds: int32(heartbeatSeconds),
@@ -138,6 +141,92 @@ func (s *Service) Complete(ctx context.Context, in CompleteInput) error {
 	}
 	if n == 0 {
 		return apperr.New(http.StatusConflict, "lease_lost", "租约条件不成立")
+	}
+	return nil
+}
+
+type ToolOutput struct {
+	Status    string
+	Output    string
+	ErrorCode string
+}
+
+func (s *Service) ToolCall(ctx context.Context, runID uuid.UUID, workerID string, attempt int32, toolCallID, name string, args json.RawMessage) (ToolOutput, error) {
+	if workerID == "" || toolCallID == "" || name == "" {
+		return ToolOutput{}, apperr.New(http.StatusBadRequest, "invalid_request", "tool call")
+	}
+	// 还没有 tool_executions。事务只把 FOR SHARE 留到检查和执行都做完。
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ToolOutput{}, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := s.q.WithTx(tx).LockRunForTool(ctx, store.LockRunForToolParams{
+		ID:         runID,
+		Attempt:    attempt,
+		LeaseOwner: pgtype.Text{String: workerID, Valid: true},
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ToolOutput{}, apperr.New(http.StatusConflict, "lease_lost", "租约条件不成立")
+	}
+	if err != nil {
+		return ToolOutput{}, err
+	}
+	out := executeTool(row, name, args)
+	if err := tx.Commit(ctx); err != nil {
+		return ToolOutput{}, err
+	}
+	return out, nil
+}
+
+func executeTool(config json.RawMessage, name string, args json.RawMessage) ToolOutput {
+	var cfg struct {
+		Tools []string `json:"tools"`
+	}
+	if err := json.Unmarshal(config, &cfg); err != nil {
+		return ToolOutput{Status: "failed", Output: "config", ErrorCode: "invalid_args"}
+	}
+	if !slices.Contains(cfg.Tools, name) {
+		return ToolOutput{Status: "failed", Output: "tool not in agent", ErrorCode: "tool_not_in_agent"}
+	}
+	if _, ok := tools.Get(name); !ok || name != "submit_result" {
+		return ToolOutput{Status: "failed", Output: "tool not allowed", ErrorCode: "tool_not_allowed"}
+	}
+	if err := validateSubmitResult(args); err != nil {
+		return ToolOutput{Status: "failed", Output: err.Error(), ErrorCode: "invalid_args"}
+	}
+	return ToolOutput{Status: "succeeded", Output: "result accepted"}
+}
+
+func validateSubmitResult(args json.RawMessage) error {
+	if len(args) == 0 {
+		return errors.New("summary")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(args, &obj); err != nil {
+		return errors.New("args")
+	}
+	for key := range obj {
+		if key != "summary" && key != "data" {
+			return errors.New(key)
+		}
+	}
+	raw, ok := obj["summary"]
+	if !ok {
+		return errors.New("summary")
+	}
+	var summary string
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return errors.New("summary")
+	}
+	if n := len([]rune(summary)); n < 1 || n > 4000 {
+		return errors.New("summary")
+	}
+	if raw, ok := obj["data"]; ok {
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return errors.New("data")
+		}
 	}
 	return nil
 }

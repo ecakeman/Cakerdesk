@@ -103,3 +103,28 @@ func (q *Queries) CompleteRun(ctx context.Context, arg CompleteRunParams) (int64
 	}
 	return result.RowsAffected(), nil
 }
+
+const lockRunForTool = `-- name: LockRunForTool :one
+SELECT config
+FROM runs
+WHERE id = $1
+  AND attempt = $2
+  AND lease_owner = $3
+  AND status = 'running'
+FOR SHARE
+`
+
+type LockRunForToolParams struct {
+	ID         uuid.UUID
+	Attempt    int32
+	LeaseOwner pgtype.Text
+}
+
+// 和完成写在同一条租约条件上，并 FOR SHARE。
+// 没有这把共享锁的话，完成请求可以插在「检查通过」和「执行」中间。
+func (q *Queries) LockRunForTool(ctx context.Context, arg LockRunForToolParams) (json.RawMessage, error) {
+	row := q.db.QueryRow(ctx, lockRunForTool, arg.ID, arg.Attempt, arg.LeaseOwner)
+	var config json.RawMessage
+	err := row.Scan(&config)
+	return config, err
+}

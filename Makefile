@@ -11,6 +11,7 @@ down:
 
 migrate:
 	cd go && go run ./cmd/cakerdesk migrate up
+	cd kernel && uv run cd-kernel setup
 
 sqlc:
 	cd go && sqlc generate

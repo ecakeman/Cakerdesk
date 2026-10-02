@@ -20,6 +20,17 @@ FROM picked
 WHERE runs.id = picked.id
 RETURNING runs.id, runs.session_id, runs.attempt, runs.config, runs.input;
 
+-- 和完成写在同一条租约条件上，并 FOR SHARE。
+-- 没有这把共享锁的话，完成请求可以插在「检查通过」和「执行」中间。
+-- name: LockRunForTool :one
+SELECT config
+FROM runs
+WHERE id = sqlc.arg('id')
+  AND attempt = sqlc.arg('attempt')
+  AND lease_owner = sqlc.arg('lease_owner')
+  AND status = 'running'
+FOR SHARE;
+
 -- name: CompleteRun :execrows
 UPDATE runs
 SET status = sqlc.arg('status'),
