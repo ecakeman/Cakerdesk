@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Cakerdesk</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>Cakerdesk</header>
+  <main>
+    <section id="projects">
+      <h2>Project</h2>
+      <form id="project-form"><input name="name" placeholder="项目名称" required /><button>新建</button></form>
+      <ul id="project-list"></ul>
+      <h2>Thread</h2>
+      <form id="thread-form"><input name="title" placeholder="线程标题" required /><button>新建</button></form>
+      <ul id="thread-list"></ul>
+    </section>
+    <section id="messages">
+      <h2>Messages</h2>
+      <ol id="message-list"></ol>
+      <form id="goal-form"><textarea name="goal" placeholder="这一次要完成的任务" required></textarea><button>开始 Run</button></form>
+    </section>
+    <section id="activity">
+      <h2>Run Activity</h2>
+      <p id="run-status">尚未开始</p>
+      <h3>Plan</h3>
+      <ol id="plan"></ol>
+      <h3>Verification</h3>
+      <pre id="verification">无</pre>
+      <h3>Subagent</h3>
+      <ul id="subagents"></ul>
+      <h3>Artifacts</h3>
+      <ul id="artifacts"></ul>
+      <h3>Timeline</h3>
+      <ol id="timeline"></ol>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
