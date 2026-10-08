@@ -27,6 +27,9 @@ VALUES ($1, $2, $3, $4, $5, $6);
 SELECT id, project_id, thread_id, goal, status, plan_snapshot, verification_snapshot, artifact_paths
 FROM runs WHERE id = $1;
 
+-- name: ListRunsByThread :many
+SELECT id, goal, status FROM runs WHERE thread_id = $1 ORDER BY created_at DESC;
+
 -- name: SetRunStatus :exec
 UPDATE runs SET status = $2 WHERE id = $1;
 

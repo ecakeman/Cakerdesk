@@ -160,3 +160,28 @@ func (s *Server) listArtifacts(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
+
+func (s *Server) readFile(c *gin.Context) {
+	run, err := s.Q.GetRun(c.Request.Context(), c.Param("runID"))
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	rel := strings.TrimPrefix(c.Param("path"), "/")
+	root := filepath.Join(s.Workspace, "threads", run.ThreadID)
+	full, err := workspace.Resolve(root, rel)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid path"})
+		return
+	}
+	body, err := os.ReadFile(full)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", body)
+}

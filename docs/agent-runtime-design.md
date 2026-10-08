@@ -842,7 +842,7 @@ Python 在启动和恢复时读取该 Run 的 status。内部事件接口只监�
 
 ## 17. CLI Projection
 
-展示层只有终端。无参数的 `cakerdesk` 进入 Terminal Agent Shell。管理命令仍在，用来查看和调试。两者都不持有 AgentState，也不决定下一步。
+展示层是 Web Agent Workspace。`make dev` 打开浏览器入口。管理命令仍在，用来查看和调试。两者都不持有 AgentState，也不决定下一步。
 
 ```text
 cakerdesk
@@ -1142,7 +1142,7 @@ Go 侧对应：`CreateRun`、`ResumeRun`、`IngestEvent`（幂等插入）、`St
 | 5. Memory 与事件 | `PostgresStore`。节点把事件写入 custom stream，EventSink 按 Run 从 1 编号后 POST Go | Run B 的模型输入看见 Run A 的 lesson。两个 Run 的 seq 各自从 1 开始 | 向量、自建记忆表、Go 重编号 |
 | 6. Go 产品面 | Gin、sqlc、goose、`pgxpool`。创建 Run 只等 202。没有 `artifact_meta` | 产品状态在 PostgreSQL。没有库的测试跳过，不退回 SQLite | Service 层、Redis、队列 |
 | 7. CLI | `project`、`thread`、`run start\|show\|watch\|resume\|cancel`、`artifact list`、`memory list`。`watch` 先历史再实时 | 取消写入 `runs.status`。进程重启后仍能看出该 Run 已被请求取消 | supervisor、lease、heartbeat |
-| 8. 收口 | 确认没有 `web/` 和静态文件服务。`watch` 把原始 JSON 收成可读时间线。一次真实进程退出后的 `resume`。Event 与 Go 投影不永久分叉。Python 按 runtime、tools、infra 归位。README、`.env.example`、Makefile 固定启动路径。无参数进入 Terminal Agent Shell，管理命令保留 | 第 3 章主线能从 Shell 看完，且上面几项都成立 | Web、平台化、supervisor、scheduler、worker queue、lease、heartbeat、自动重试框架、分布式恢复、exactly-once、Kafka、Redis、多 Agent、多 Provider |
+| 8. 收口 | 浏览器工作区经 REST 和 SSE 投影同一条事件流。`watch` 把原始 JSON 收成可读时间线。一次真实进程退出后的 `resume`。Event 与 Go 投影不永久分叉。Python 按 runtime、tools、infra 归位。README、`.env.example`、Makefile 固定启动路径。管理命令保留 | 第 3 章主线能从工作区看完，且上面几项都成立 | 平台化、supervisor、scheduler、worker queue、lease、heartbeat、自动重试框架、分布式恢复、exactly-once、Kafka、Redis、多 Agent、多 Provider |
 
 ---
 
@@ -1179,6 +1179,6 @@ Demo 可以固定输入文件、固定任务和固定模型配置，也可以用
 - P1，尽快修：SSE 丢掉关键事件，CLI 看不见 Replan，CLI 只能看见原始 JSON，产物路径失效，Run 状态错乱，事件已写入但 Go 快照永久没有同步，`resume` 重新 bootstrap 并覆盖已有 Plan、Findings、Messages。
 - P2，记下但不做：exactly-once、通用副作用日志、自动故障恢复、Supervisor、Scheduler、Worker Queue、Lease、Heartbeat、高可用、多副本抢主、分布式一致性平台、高并发治理、复杂重试、RBAC、多租户、Provider Factory、Plugin 或 Skill Registry、Event Bus、Redis、Kafka。
 
-某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。第 3 章的主线能够完整运行，下一次 Run 能看见前一次的 Memory，真实进程中断后能从同一 Thread 的 Checkpoint 继续，Shell 能从历史事件跟到实时事件，Go 的事件和 Run 投影不永久分叉，这个展品就完成了。README、Makefile 和目录归位只是把这条路径固定下来。其后增加的能力，包括 Web 和平台化，不再属于本项目的完成标准。
+某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。第 3 章的主线能够完整运行，下一次 Run 能看见前一次的 Memory，真实进程中断后能从同一 Thread 的 Checkpoint 继续，工作区能从历史事件跟到实时事件，Go 的事件和 Run 投影不永久分叉，这个展品就完成了。README、Makefile 和目录归位只是把这条路径固定下来。其后增加的平台化能力不再属于本项目的完成标准。
 
 实现时只问：为了证明 Long-Horizon Agent Runtime，现在还缺哪一跳。不问 DeerFlow 还有什么没搬过来。

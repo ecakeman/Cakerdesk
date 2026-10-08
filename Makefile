@@ -39,10 +39,13 @@ dev:
 	}; \
 	free_port 8080; \
 	free_port 8090; \
+	free_port 3000; \
+	test -d $(ROOT)/frontend/node_modules || npm --prefix $(ROOT)/frontend install; \
 	( cd $(ROOT)/go && go build -o $(ROOT)/.cakerdesk-dev ./cmd/cakerdesk ); \
 	$(PY) -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' $(ROOT)/.cakerdesk-dev serve & go_pid=$$!; \
 	$(PY) -c 'import os,sys; os.chdir(sys.argv[1]); os.setsid(); os.execvp(sys.argv[2], sys.argv[2:])' $(ROOT)/python $(PY) -m cakerdesk.main & py_pid=$$!; \
-	trap 'kill $$go_pid $$py_pid 2>/dev/null || true; wait $$go_pid $$py_pid 2>/dev/null || true' EXIT INT TERM; \
+	npm --prefix $(ROOT)/frontend run dev & web_pid=$$!; \
+	trap 'kill $$go_pid $$py_pid $$web_pid 2>/dev/null || true; wait $$go_pid $$py_pid $$web_pid 2>/dev/null || true' EXIT INT TERM; \
 	i=0; \
 	until curl -sf "$$CAKERDESK_URL/healthz" >/dev/null; do \
 		i=$$((i+1)); \
@@ -57,15 +60,14 @@ dev:
 		sleep 1; \
 	done; \
 	echo "Python: ready"; \
-	$(ROOT)/.cakerdesk-dev; \
-	status=$$?; \
-	kill $$go_pid $$py_pid 2>/dev/null || true; \
-	exit $$status
-
-shell:
-	@set -a; [ -f .env ] && . ./.env; set +a; \
-	export CAKERDESK_URL="$${CAKERDESK_URL:-http://127.0.0.1:8080}"; \
-	cd go && go run ./cmd/cakerdesk
+	i=0; \
+	until curl -sf http://127.0.0.1:3000 >/dev/null; do \
+		i=$$((i+1)); \
+		if [ $$i -gt 90 ]; then echo "工作区没有起来"; exit 1; fi; \
+		sleep 1; \
+	done; \
+	echo "工作区: http://127.0.0.1:3000"; \
+	wait $$web_pid
 
 test:
 	cd go && go test ./...

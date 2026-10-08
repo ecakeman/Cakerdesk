@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,10 +22,8 @@ func main() {
 	base := env("CAKERDESK_URL", "http://127.0.0.1:8080")
 	opt := cli.Options{BaseURL: base, Out: os.Stdout, In: os.Stdin}
 	if len(os.Args) == 1 {
-		if err := cli.Shell(opt); err != nil {
-			log.Fatal(err)
-		}
-		return
+		fmt.Fprintln(os.Stderr, "用法: cakerdesk serve | project | thread | run | artifact | memory")
+		os.Exit(2)
 	}
 	if os.Args[1] == "serve" {
 		if err := serve(); err != nil {

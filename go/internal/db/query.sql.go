@@ -283,6 +283,36 @@ func (q *Queries) ListProjects(ctx context.Context) ([]ListProjectsRow, error) {
 	return items, nil
 }
 
+const listRunsByThread = `-- name: ListRunsByThread :many
+SELECT id, goal, status FROM runs WHERE thread_id = $1 ORDER BY created_at DESC
+`
+
+type ListRunsByThreadRow struct {
+	ID     string
+	Goal   string
+	Status string
+}
+
+func (q *Queries) ListRunsByThread(ctx context.Context, threadID string) ([]ListRunsByThreadRow, error) {
+	rows, err := q.db.Query(ctx, listRunsByThread, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRunsByThreadRow
+	for rows.Next() {
+		var i ListRunsByThreadRow
+		if err := rows.Scan(&i.ID, &i.Goal, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listThreads = `-- name: ListThreads :many
 SELECT id, title FROM threads WHERE project_id = $1 ORDER BY created_at
 `

@@ -45,6 +45,19 @@ func (s *Server) listThreads(c *gin.Context) {
 	c.JSON(http.StatusOK, threadsJSON(items))
 }
 
+func (s *Server) listRuns(c *gin.Context) {
+	items, err := s.Q.ListRunsByThread(c.Request.Context(), c.Param("threadID"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		out = append(out, gin.H{"id": item.ID, "goal": item.Goal, "status": item.Status})
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (s *Server) listMessages(c *gin.Context) {
 	items, err := s.Q.ListMessages(c.Request.Context(), c.Param("threadID"))
 	if err != nil {

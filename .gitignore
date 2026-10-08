@@ -6,3 +6,5 @@ __pycache__/
 .venv/
 .env
 .cakerdesk-dev
+frontend/node_modules/
+frontend/.next/

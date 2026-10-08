@@ -17,10 +17,10 @@ def ensure_layout(root: Path) -> None:
 
 
 def resolve(root: Path, rel: str, *, write: bool) -> Path:
-    if not rel or rel.startswith("/") or "\\" in rel:
+    if not rel or rel.startswith("/") or "\\" in rel or rel in {".", "./"}:
         raise WorkspaceError("路径必须是工作区内的相对路径")
     parts = Path(rel).parts
-    if ".." in parts or parts[0] not in (_WRITE_ROOTS if write else _READ_ROOTS):
+    if not parts or ".." in parts or parts[0] not in (_WRITE_ROOTS if write else _READ_ROOTS):
         raise WorkspaceError("路径越出工作区或目录不允许")
     root_resolved = root.resolve()
     path = (root_resolved / rel).resolve()

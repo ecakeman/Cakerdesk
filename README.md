@@ -18,9 +18,9 @@ run.completed 任务完成 artifacts/report.md
 模型说出「写好了」不会结束。只有 `submit_for_verification` 离开 Lead 循环，Verifier 再读磁盘。失败把对应步骤从 completed 改回 blocked，Replan 保留已完成步骤并改后续计划。
 
 ```text
-Terminal Agent Shell
+Web Agent Workspace
         |
-        | 自然语言 / 斜杠命令
+        | REST + SSE
         v
    Go 产品状态
  Project Thread Run Event
@@ -34,7 +34,7 @@ Terminal Agent Shell
  Workspace 上的真实文件
 ```
 
-Shell 只负责输入和事件投影。它不保存 AgentState，也不决定下一步。
+页面只负责输入和事件投影。它不保存 AgentState，也不决定下一步。
 
 ## 启动
 
@@ -46,10 +46,10 @@ make setup
 make dev
 ```
 
-`make dev` 在 `:8080` 启动 Go，在 `:8090` 启动 Python，然后进入 Shell。Ctrl-C 会停掉这两个进程。已经启动服务时，用 `make shell` 只进入 Shell。
+`make dev` 启动 Go `:8080`、Python `:8090` 和前端 `:3000`，然后打印 `http://127.0.0.1:3000`。Ctrl-C 停掉三个进程。
 
-管理命令仍在，用来查看和调试：`cakerdesk project`、`thread`、`run`、`artifact`、`memory`。HTTP 服务是 `cakerdesk serve`。
+管理命令仍在，用来查看和调试：`cakerdesk project`、`thread`、`run`、`artifact`、`memory`。HTTP 服务是 `cakerdesk serve`。无参数只打印用法。
 
 ## 范围
 
-做到主线真实、模块连通、Demo 能跑完、Shell 能看清过程。不做 Web，不做队列、supervisor、多 Agent 平台。行为细节在 [docs/agent-runtime-design.md](docs/agent-runtime-design.md)。
+做到主线真实、模块连通、浏览器里能看清一次长任务。不做队列、supervisor、多 Agent 平台。行为细节在 [docs/agent-runtime-design.md](docs/agent-runtime-design.md)。
