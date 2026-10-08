@@ -693,7 +693,7 @@ Verify 再次打开 workspace_root/artifacts/report.md
     不以 state.artifacts 里有这条字符串作为文件存在的证据
 ```
 
-若进程在 `write_file` 返回成功前崩溃，Checkpoint 里没有这条 artifact，磁盘可能有半截文件。下次 Run 开始时的目录扫描会把已存在文件放回 `artifacts` 列表，Verify 仍以当时磁盘内容为准。
+若进程在 `write_file` 返回成功前崩溃，Checkpoint 里没有这条 artifact，磁盘可能有半截文件。同一次 Run 的 `resume` 从最后一个已提交节点继续，见第 19 章：尚未进入 Checkpoint 的那次写入可能再执行一遍。目录扫描不能代替这次恢复。Verify 仍以当时磁盘内容为准。
 
 ---
 
@@ -790,7 +790,17 @@ data: {"run_id":"...","seq":17,"type":"verification.completed","timestamp":"..."
 | Project Memory 全文 | Python 的 `PostgresStore` | CLI 的活动流只有 `memory.written` 的短 summary。Go 不读取记忆来做决策 |
 | 模型选择与工具执行 | Python | Go 不知道这次有没有调用模型 |
 
-`run show` 需要能给出「当前 Run 已投影的计划、最近一次验证、消息、产物路径」，否则只有 SSE 的话，重新打开会丢掉已经播过的过程。做法是 Go 在插入 `plan.updated`、`verification.completed`、`run.completed` 时，把 payload 抄进 `runs` 行上的 `plan_snapshot`、`verification_snapshot`、`artifact_paths`。这是事件的物化，不是第二套规划器。Python Checkpoint 仍是 Agent 继续执行时的真相。若两边短暂不一致，以 Checkpoint 里下一步要读的 State 为准；CLI 以 Go 快照为准，直到下一条事件到来。
+三份东西不要混：
+
+```text
+Python Checkpoint = Agent 继续执行时的事实源
+Go Event         = 运行过程的可观察记录
+Go Run Snapshot  = CLI 刷新用的物化视图
+```
+
+`runs.plan_snapshot`、`verification_snapshot`、`artifact_paths` 和由终态事件改写的 `status` 都是这第三份。它不是第二份 AgentState。`run show` 读它，才能在没有 SSE 时看见当前计划、最近一次验证和产物路径。
+
+会改这些字段的事件，插入 `events` 和更新对应快照必须在同一事务里。不用事务也可以，但必须有等价的失败恢复，不能留下「事件已经是新的，Run 快照永远是旧的」。这只约束 Go 的观察面。不因此做事件溯源、通用投影框架或消息队列。Agent 下一步仍只读 Checkpoint。
 
 Go 调用 Python。Python 立刻返回 202，图在请求外执行：
 
@@ -842,6 +852,8 @@ cakerdesk artifact list
 cakerdesk memory list
 ```
 
+`run show` 是当前快照，`run watch` 是时间线。两个命令不合成一个接口。
+
 `run show` 打印：
 
 - Run 状态：running / cancel_requested / completed / failed / cancelled
@@ -849,21 +861,30 @@ cakerdesk memory list
 - 最近一次 Verification 的 passed 和 findings
 - Artifacts：Run 上的路径快照。`artifact list` 再对磁盘做存在性核对
 
-`run watch` 先按 seq 打出已有事件，再接 SSE。时间线只来自事件：
-
-- `replan.started` 打出原因，下一条 `plan.updated` 换计划
-- Subagent 的 started / completed 打出任务名和短 summary
-- `model.message` 和 `tool.completed` 打出短文本
+`run watch` 先按 seq 打出已有事件，再接 SSE，接成同一条时间线。它消费的是事件，打印的是给演示者看的短句，不是 SSE 里的 JSON。
 
 ```text
 Event
  ↓
-Go events 表与 runs 上的快照
+Go events 表
  ↓
-CLI 输出
+CLI Projection
+ ↓
+人可读的一行
 ```
 
-CLI 不请求 Python 做决策，不调用模型，不改计划，不判定通过，不写记忆。`memory list` 只读已经写好的项目记忆。
+每种事件只投影自己 payload 里已经有的字段：
+
+- `tool.completed`：工具名和短摘要
+- `verification.completed`：passed、失败的 criterion、短 evidence
+- `plan.updated`：当前步骤和 status。和本条时间线里上一次计划相比，能看出保留、重新打开和新增，这个比较只存在于本次输出
+- `replan.started`：`verification_failed`
+- `subagent.started`：任务摘要
+- `subagent.completed`：结果摘要
+- `memory.written`：fact 或 lesson 的短摘要
+- `run.completed` / `run.failed` / `run.cancelled`：终态和原因
+
+CLI 不重算 Plan，不重判 Verify，不决定要不要 Replan，不读 Checkpoint，不另存一份 AgentState。它不请求 Python 做决策，不调用模型，不写记忆。`memory list` 只读已经写好的项目记忆。
 
 演示主线在输出里的变化：
 
@@ -904,13 +925,13 @@ Verify
   Checkpoint.findings.passed = false
   把 S4 改成 blocked
   verification.completed 发给 Go
-  Go 更新 verification_snapshot
+  同一事务里写入 events，并更新 verification_snapshot
 
 Replan
   读 findings 和 plan
   Checkpoint.plan = v2，含 diff
   replan.started 与 plan.updated 发给 Go
-  Go 更新 plan_snapshot
+  plan.updated 与 plan_snapshot 一起落盘
 
 Lead 下一次模型调用
   ContextManager 读 Checkpoint 的 plan v2 和 findings
@@ -950,6 +971,8 @@ memory.written 只带短 summary
 
 这些是停机和拒绝，不是策略引擎。
 
+进程退出和工具只执行一次不是同一件事。恢复用的是 `PostgresSaver`、`durability="sync"` 和产品 `thread_id`，所以续跑点是最后一个已经写入的 Checkpoint，不是最后一个已经发生的工具副作用。`write_file` 已经把文件写上、下一步 Checkpoint 还没落盘时，进程退出后再 `resume`，这次写入可能再执行一遍。文件工具要能再跑；Verify 仍只看磁盘。不为这件事增加副作用日志、幂等键、通用执行器、副作用注册表、调度器或 supervisor。
+
 ---
 
 ## 20. Non-Goals
@@ -968,7 +991,8 @@ memory.written 只带短 summary
 - 多种 Verifier、评分器和独立验证产品
 - 高可用、多副本抢主、RBAC、多租户
 - 自动 supervisor、lease、heartbeat、Worker 队列
-- 把每个工具包成 exactly-once 副作用框架
+- 把每个工具包成 exactly-once 副作用框架，以及为此做的 task ledger、idempotency key、operation journal、side-effect table、recovery supervisor
+- Event Sourcing、CQRS、通用投影框架、消息队列、Kafka、Redis
 
 DeerFlow 里还有标题生成、澄清问题、看图、后台任务、引用收据、自定义 Agent 配置。它们对完整产品有用，但不出现在第 3 章的主线上，因此不做。
 
@@ -993,6 +1017,10 @@ Event 是观察层，是因为 CLI 和 Go 需要过程，但下一步该不该 R
 Go 不参与决策，是因为契约、计划、验证和记忆的一致性都在同一条图里。若 Go 也保存一份可写的 Plan 并允许编辑，Python 下一轮就不知道该信谁。Go 只物化事件快照，供刷新使用。
 
 CLI 只做投影，是因为展示主线要让人看见运行时的决定，而不是在命令里再实现一个运行时。
+
+Checkpoint 能恢复，是为了证明 State 还在、Context 能重建、Plan 能变、Verify 能拒绝、Replan 能继续、Memory 能跨 Run、进程中断后还能从同一 Thread 接着做。它不证明任意工具的副作用只会发生一次。把这两件事写成一个框架，展品就会去补调度和幂等，而第 3 章的主线并不需要它们。
+
+Go 的 Run 快照若可以和事件永久分叉，CLI 刷新看到的计划就不是刚才播过的那条过程。所以观察层要一起落盘。这仍然不是第二份可执行的 AgentState，下一步该不该 Replan 还是由 Python 的边决定。
 
 ---
 
@@ -1077,7 +1105,11 @@ Go 侧对应：`CreateRun`、`ResumeRun`、`IngestEvent`（幂等插入）、`St
 - `delegate_task` 期间子级自己的模型消息不出现在父 Checkpoint。父 `messages` 里能找到那条结果 ToolMessage。
 - `write_file` 之后磁盘上有非空文件。Verify 的 evidence 来自这次读取，而不是只看 `state.artifacts`。
 - `run.started`、`tool.started`、`tool.completed`、`verification.completed`、`run.completed` 或 `run.failed` 出现在 Go 的 `events` 表，且 `(run_id, seq)` 唯一。SSE 用 `after_seq` 能只收到之后的事件。
-- `run watch` 能依次看到计划、失败的验证、新计划、产物路径和完成状态，也能看到模型文本和工具短结果。中断后 `resume` 不重置已有 Plan、Findings 和已写文件。重启后仍能从 `runs.status` 看出取消已经提出。
+- `run watch` 打出的是人能顺着读的短句：计划、工具、Subagent、提交、FAIL、Replan、新计划、再执行、PASS、Memory、completed。断线重连后，历史事件和实时事件仍是一条时间线。只收到 JSON 不算这条通过。
+- 真实 Python 进程退出后，用同一个 `thread_id` 再 `resume`。Plan、Findings、Messages 还在，已经写好的文件还在，本 Run 的 bootstrap 不重跑，下一节点继续。Checkpoint 边界之前的文件工具允许再执行一次。只在同一进程里用 `interrupt_after` 停住，不能代替这次验收。
+- `plan.updated`、`verification.completed`、`run.completed` 写入后，对应的 `plan_snapshot`、`verification_snapshot`、`artifact_paths`、`status` 不能永久停在旧值。插入和快照更新同事务，或有等价恢复。
+- 产品路径使用 `PostgresSaver` 和 `PostgresStore`。`MemorySaver` 与 `InMemoryStore` 只作为测试替身，不是线上的持久化实现。
+- 重启后仍能从 `runs.status` 看出取消已经提出。
 
 ---
 
@@ -1094,7 +1126,7 @@ Go 侧对应：`CreateRun`、`ResumeRun`、`IngestEvent`（幂等插入）、`St
 | 5. Memory 与事件 | `PostgresStore`。节点把事件写入 custom stream，EventSink 按 Run 从 1 编号后 POST Go | Run B 的模型输入看见 Run A 的 lesson。两个 Run 的 seq 各自从 1 开始 | 向量、自建记忆表、Go 重编号 |
 | 6. Go 产品面 | Gin、sqlc、goose、`pgxpool`。创建 Run 只等 202。没有 `artifact_meta` | 产品状态在 PostgreSQL。没有库的测试跳过，不退回 SQLite | Service 层、Redis、队列 |
 | 7. CLI | `project`、`thread`、`run start\|show\|watch\|resume\|cancel`、`artifact list`、`memory list`。`watch` 先历史再实时 | 取消写入 `runs.status`。进程重启后仍能看出该 Run 已被请求取消 | supervisor、lease、heartbeat |
-| 8. 收口 | 删除静态页面和 Go 的静态文件服务。用周报主线加上一次中断恢复收口 | 第 3 章主线能用 CLI 看完 | 此后的平台能力 |
+| 8. 收口 | 确认没有 `web/` 和静态文件服务。`watch` 把原始 JSON 收成可读时间线。一次真实进程退出后的 `resume`。Event 与 Go 投影不永久分叉 | 第 3 章主线能用 CLI 看完，且上面三项都成立 | supervisor、scheduler、worker queue、lease、heartbeat、自动重试框架、分布式恢复、exactly-once、Kafka、Redis、多 Agent、多 Provider |
 
 ---
 
@@ -1111,7 +1143,7 @@ D  工程边界和异常处理
 E  生产级完整性
 ```
 
-S/A/B/C 没有完成之前，不把时间花在 D/E。
+做到 S/A/B/C，再加上第 23 章里那几项必要的 D，项目就完成。不要求 E 里的生产级能力。
 
 四个核心，按这个深度做：
 
@@ -1128,9 +1160,9 @@ Demo 可以固定输入文件、固定任务和固定模型配置，也可以用
 工程问题按这个分类：
 
 - P0，立刻修：Context 污染 Checkpoint，Memory 进不了下一 Run，Verify 永远 PASS，Replan 不改变行为，Subagent 没有独立执行，Artifact 没有落盘。
-- P1，尽快修：SSE 丢掉关键事件，CLI 看不见 Replan，产物打不开，Run 状态错乱。
-- P2，记下但不做：复杂重试、高可用、精细权限、分布式一致性、高并发、生产级故障恢复、复杂幂等。
+- P1，尽快修：SSE 丢掉关键事件，CLI 看不见 Replan，CLI 只能看见原始 JSON，产物路径失效，Run 状态错乱，事件已写入但 Go 快照永久没有同步，`resume` 重新 bootstrap 并覆盖已有 Plan、Findings、Messages。
+- P2，记下但不做：exactly-once、通用副作用日志、自动故障恢复、Supervisor、Scheduler、Worker Queue、Lease、Heartbeat、高可用、多副本抢主、分布式一致性平台、高并发治理、复杂重试、RBAC、多租户、Provider Factory、Plugin 或 Skill Registry、Event Bus、Redis、Kafka。
 
-某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。最终演示能走完第 3 章的主线，包括下一次 Run 看见 Memory、一次中断后的恢复，以及 CLI 跟上全过程，项目就成功。其后的完善是可选项。
+某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。第 3 章的主线能够完整运行，下一次 Run 能看见前一次的 Memory，真实进程中断后能从同一 Thread 的 Checkpoint 继续，CLI 能从历史事件跟到实时事件，Go 的事件和 Run 投影不永久分叉，这个展品就完成了。其后增加的能力属于产品化或平台化，不再属于本项目的完成标准。
 
 实现时只问：为了证明 Long-Horizon Agent Runtime，现在还缺哪一跳。不问 DeerFlow 还有什么没搬过来。
