@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/http"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,9 @@ func (s *Server) Router() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
+	router.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	router.POST("/api/projects", s.createProject)
 	router.GET("/api/projects", s.listProjects)
 	router.GET("/api/projects/:projectID/memory", s.listMemory)

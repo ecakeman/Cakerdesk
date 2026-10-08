@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,17 +14,44 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ValidationError
 
-from cakerdesk.context import CONTEXT_MARKER, ContextManager
-from cakerdesk.events import EventSink, fetch_run_status, publish
-from cakerdesk.lead import decide_after_model, decide_after_tools
-from cakerdesk.middleware import maybe_summarize
-from cakerdesk.plan import block_failed_steps, normalize_contract, normalize_plan, validate_diff
+from cakerdesk.runtime.context import CONTEXT_MARKER, ContextManager
+from cakerdesk.infra.events import EventSink, fetch_run_status, publish
+from cakerdesk.runtime.lead import decide_after_model, decide_after_tools
+from cakerdesk.runtime.middleware import maybe_summarize
+from cakerdesk.runtime.plan import block_failed_steps, normalize_contract, normalize_plan, validate_diff
 from cakerdesk.schemas import ContractOut, PlanOut, ReflectionOut
-from cakerdesk.state import AgentState, estimate_tokens, fresh_guard
-from cakerdesk.tooldefs import LEAD_TOOLS
-from cakerdesk.tools import execute_tool_calls, public_plan
-from cakerdesk.verify import verify
-from cakerdesk.workspace import ensure_layout, scan_artifacts
+from cakerdesk.runtime.state import AgentState, estimate_tokens, fresh_guard
+from cakerdesk.tools.definitions import LEAD_TOOLS
+from cakerdesk.tools.executor import execute_tool_calls, public_plan
+from cakerdesk.runtime.verify import verify
+from cakerdesk.infra.workspace import ensure_layout, scan_artifacts
+
+logger = logging.getLogger("cakerdesk.runtime.graph")
+_TERMINAL = {"run.completed", "run.failed", "run.cancelled"}
+
+
+def _exceptions(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def fail_run(run_id: str, sink: EventSink, exc: BaseException) -> None:
+    logger.exception("run %s failed", run_id)
+    if any(event["run_id"] == run_id and event["type"] in _TERMINAL for event in sink.events):
+        return
+    reason = "runtime_error"
+    chosen = exc
+    for item in _exceptions(exc):
+        if any(frame.name in {"invoke", "structured"} for frame in traceback.extract_tb(item.__traceback__)):
+            reason = "model_error"
+            chosen = item
+            break
+    message = (str(chosen).strip().splitlines() or ["provider request failed"])[0][:200]
+    sink.emit(run_id, "run.failed", {"reason": reason, "message": message})
 
 
 def load_skill_names(root: Path) -> list[str]:
@@ -126,6 +155,19 @@ def execute_run(
         },
         "recursion_limit": 80,
     }
+    try:
+        return _stream_run(compiled, config, sink, run_id, resume=resume, interrupt_after=interrupt_after)
+    except RuntimeError as exc:
+        if str(exc) == "没有可恢复的检查点":
+            raise
+        fail_run(run_id, sink, exc)
+        return {}
+    except Exception as exc:
+        fail_run(run_id, sink, exc)
+        return {}
+
+
+def _stream_run(compiled, config, sink: EventSink, run_id: str, *, resume: bool, interrupt_after: list[str] | None) -> dict:
     incoming: dict | None = {}
     if resume:
         snapshot = compiled.get_state(config)
@@ -192,10 +234,10 @@ def _cancelled(config: RunnableConfig) -> bool:
 
 
 def _prompt(purpose: str) -> str:
-    path = Path(__file__).resolve().parent / "prompts" / f"{purpose}.md"
+    path = Path(__file__).resolve().parents[1] / "prompts" / f"{purpose}.md"
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
-    from cakerdesk.context import RULES
+    from cakerdesk.runtime.context import RULES
 
     return RULES
 
@@ -481,13 +523,16 @@ def emit_completed(state: AgentState, config: RunnableConfig) -> dict:
 def emit_failed(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
     guard = state.get("guard") or {}
+    payload = {
+        "reason": guard.get("fail_reason") or "failed",
+        "message": guard.get("fail_message") or "运行失败",
+    }
+    if guard.get("last_output"):
+        payload["last_output"] = str(guard["last_output"])[:200]
     publish(
         config,
         "run.failed",
-        {
-            "reason": guard.get("fail_reason") or "failed",
-            "message": guard.get("fail_message") or "运行失败",
-        },
+        payload,
     )
     return {"route": "done"}
 

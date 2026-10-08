@@ -7,7 +7,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-logger = logging.getLogger("cakerdesk.events")
+logger = logging.getLogger("cakerdesk.infra.events")
 
 
 def _now() -> str:

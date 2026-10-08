@@ -842,15 +842,23 @@ Python 在启动和恢复时读取该 Run 的 status。内部事件接口只监�
 
 ## 17. CLI Projection
 
-展示层只有 CLI。它不持有 AgentState。
+展示层只有终端。无参数的 `cakerdesk` 进入 Terminal Agent Shell。管理命令仍在，用来查看和调试。两者都不持有 AgentState，也不决定下一步。
 
 ```text
+cakerdesk
+cakerdesk serve
 cakerdesk project ...
 cakerdesk thread ...
 cakerdesk run start|show|watch|resume|cancel
 cakerdesk artifact list
 cakerdesk memory list
 ```
+
+Shell 是输入入口加事件投影。启动时用现有的 list 和 create：没有 Project 或 Thread 就问一个名字并创建；只有一个就直接用；多个就按编号选。之后记住当前的 `project_id` 和 `thread_id`。
+
+普通一行文字走现有的创建 Run，再用现有 SSE 读事件，并用同一套投影打出短句。Run 到达 `run.completed`、`run.failed` 或 `run.cancelled` 后回到 `>`。下一次输入仍用同一个 Project 和 Thread。
+
+以 `/` 开头的只有 `/help`、`/new`、`/switch`、`/memory`、`/artifact`、`/cancel`、`/resume`、`/exit`。它们调用已有的 Go API。Shell 不访问 Python，不读 Checkpoint，不保存计划，也不判断任务有没有完成。
 
 `run show` 是当前快照，`run watch` 是时间线。两个命令不合成一个接口。
 
@@ -1030,28 +1038,36 @@ Go 的 Run 快照若可以和事件永久分叉，CLI 刷新看到的计划就�
 
 ```text
 cakerdesk-next/
+├── README.md
+├── Makefile
+├── .env.example
 ├── docs/agent-runtime-design.md
 ├── python/
 │   ├── cakerdesk/
 │   │   ├── main.py                 # POST /internal/runs 立即 202；cancel；resume
-│   │   ├── model.py                # 只构造 ChatOpenAI，并暴露 bind_tools / with_structured_output
-│   │   ├── graph.py                # 组装第 5 章的图。PostgresSaver，durability=sync
-│   │   ├── state.py                # AgentState
-│   │   ├── lead.py                 # LeadLoop 的 model 节点与路由
-│   │   ├── tools.py                # @tool：文件工具、set_step_status、submit、delegate_task
 │   │   ├── schemas.py              # Contract、Plan、Reflection
 │   │   ├── prompts/                # 各次调用的固定说明
-│   │   ├── context.py              # ContextManager
-│   │   ├── middleware.py           # 三个 middleware
-│   │   ├── memory.py               # PostgresStore 的读写
-│   │   ├── plan.py                 # 规范化与 PlanDiff 校验。不截取 JSON
-│   │   ├── verify.py               # Verifier
-│   │   ├── subagent.py             # SubagentExecutor
-│   │   ├── workspace.py            # 路径约束与扫描
-│   │   └── events.py               # 按 Run 分配 seq，并 POST Go
+│   │   ├── runtime/
+│   │   │   ├── graph.py            # 组装第 5 章的图。PostgresSaver，durability=sync
+│   │   │   ├── state.py            # AgentState
+│   │   │   ├── lead.py             # LeadLoop 的 model 节点与路由
+│   │   │   ├── context.py          # ContextManager
+│   │   │   ├── middleware.py       # 三个 middleware
+│   │   │   ├── memory.py           # PostgresStore 的读写
+│   │   │   ├── plan.py             # 规范化与 PlanDiff 校验。不截取 JSON
+│   │   │   ├── verify.py           # Verifier
+│   │   │   └── subagent.py         # SubagentExecutor
+│   │   ├── tools/
+│   │   │   ├── definitions.py      # @tool：文件工具、set_step_status、submit、delegate_task
+│   │   │   └── executor.py         # 执行这些调用。不是 ToolNode
+│   │   └── infra/
+│   │       ├── model.py            # 只构造 ChatOpenAI，并暴露 bind_tools / with_structured_output
+│   │       ├── events.py           # 按 Run 分配 seq，并 POST Go
+│   │       └── workspace.py        # 路径约束与扫描
 │   └── skills/                     # 可空。只留 SKILL.md 痕迹
 └── go/
-    ├── cmd/cakerdesk/              # serve 与 CLI
+    ├── cmd/cakerdesk/              # 无参数进 Shell；serve 启动 HTTP
+    ├── internal/cli/               # Shell 与管理命令
     ├── internal/server/            # Gin handler，直接调用 sqlc
     ├── internal/db/                # sqlc 生成代码
     └── migrations/                 # projects threads messages runs events
@@ -1126,7 +1142,7 @@ Go 侧对应：`CreateRun`、`ResumeRun`、`IngestEvent`（幂等插入）、`St
 | 5. Memory 与事件 | `PostgresStore`。节点把事件写入 custom stream，EventSink 按 Run 从 1 编号后 POST Go | Run B 的模型输入看见 Run A 的 lesson。两个 Run 的 seq 各自从 1 开始 | 向量、自建记忆表、Go 重编号 |
 | 6. Go 产品面 | Gin、sqlc、goose、`pgxpool`。创建 Run 只等 202。没有 `artifact_meta` | 产品状态在 PostgreSQL。没有库的测试跳过，不退回 SQLite | Service 层、Redis、队列 |
 | 7. CLI | `project`、`thread`、`run start\|show\|watch\|resume\|cancel`、`artifact list`、`memory list`。`watch` 先历史再实时 | 取消写入 `runs.status`。进程重启后仍能看出该 Run 已被请求取消 | supervisor、lease、heartbeat |
-| 8. 收口 | 确认没有 `web/` 和静态文件服务。`watch` 把原始 JSON 收成可读时间线。一次真实进程退出后的 `resume`。Event 与 Go 投影不永久分叉 | 第 3 章主线能用 CLI 看完，且上面三项都成立 | supervisor、scheduler、worker queue、lease、heartbeat、自动重试框架、分布式恢复、exactly-once、Kafka、Redis、多 Agent、多 Provider |
+| 8. 收口 | 确认没有 `web/` 和静态文件服务。`watch` 把原始 JSON 收成可读时间线。一次真实进程退出后的 `resume`。Event 与 Go 投影不永久分叉。Python 按 runtime、tools、infra 归位。README、`.env.example`、Makefile 固定启动路径。无参数进入 Terminal Agent Shell，管理命令保留 | 第 3 章主线能从 Shell 看完，且上面几项都成立 | Web、平台化、supervisor、scheduler、worker queue、lease、heartbeat、自动重试框架、分布式恢复、exactly-once、Kafka、Redis、多 Agent、多 Provider |
 
 ---
 
@@ -1151,7 +1167,7 @@ E  生产级完整性
 - Verification → Replan 只做闭环，不追求复杂。
 - LeadLoop 保证系统能连续工作。
 
-Subagent、Go、Event、CLI 是主链稳定之后的展示层。CLI 让人看见 Agent 在做什么。
+Subagent、Go、Event、CLI 是主链稳定之后的展示层。无参数进入的 Shell 是演示入口，管理命令用来查看和调试。Shell 让人看见 Agent 在做什么，不持有 AgentState。
 
 一个抽象如果只有一个实现，而且不解决当前主线，就不创建。不提前做 `ProviderFactory`、`ToolRegistry`、`AgentRegistry`、`SkillRegistry`、`MemoryBackend`、`SandboxProvider`、`EventBus`、`PluginManager`、`ExtensionManager`。
 
@@ -1163,6 +1179,6 @@ Demo 可以固定输入文件、固定任务和固定模型配置，也可以用
 - P1，尽快修：SSE 丢掉关键事件，CLI 看不见 Replan，CLI 只能看见原始 JSON，产物路径失效，Run 状态错乱，事件已写入但 Go 快照永久没有同步，`resume` 重新 bootstrap 并覆盖已有 Plan、Findings、Messages。
 - P2，记下但不做：exactly-once、通用副作用日志、自动故障恢复、Supervisor、Scheduler、Worker Queue、Lease、Heartbeat、高可用、多副本抢主、分布式一致性平台、高并发治理、复杂重试、RBAC、多租户、Provider Factory、Plugin 或 Skill Registry、Event Bus、Redis、Kafka。
 
-某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。第 3 章的主线能够完整运行，下一次 Run 能看见前一次的 Memory，真实进程中断后能从同一 Thread 的 Checkpoint 继续，CLI 能从历史事件跟到实时事件，Go 的事件和 Run 投影不永久分叉，这个展品就完成了。其后增加的能力属于产品化或平台化，不再属于本项目的完成标准。
+某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。第 3 章的主线能够完整运行，下一次 Run 能看见前一次的 Memory，真实进程中断后能从同一 Thread 的 Checkpoint 继续，Shell 能从历史事件跟到实时事件，Go 的事件和 Run 投影不永久分叉，这个展品就完成了。README、Makefile 和目录归位只是把这条路径固定下来。其后增加的能力，包括 Web 和平台化，不再属于本项目的完成标准。
 
 实现时只问：为了证明 Long-Horizon Agent Runtime，现在还缺哪一跳。不问 DeerFlow 还有什么没搬过来。

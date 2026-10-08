@@ -4,3 +4,5 @@ __pycache__/
 *.db
 /workspace/
 .venv/
+.env
+.cakerdesk-dev

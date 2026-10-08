@@ -96,11 +96,12 @@ func projectLine(previous []stepView, eventType string, payload json.RawMessage)
 		return strings.TrimSpace("run.completed " + body.Summary + " " + strings.Join(body.Artifacts, " ")), previous
 	case "run.failed":
 		var body struct {
-			Reason  string `json:"reason"`
-			Message string `json:"message"`
+			Reason     string `json:"reason"`
+			Message    string `json:"message"`
+			LastOutput string `json:"last_output"`
 		}
 		_ = json.Unmarshal(payload, &body)
-		return strings.TrimSpace("run.failed " + body.Reason + " " + body.Message), previous
+		return strings.TrimSpace("run.failed " + body.Reason + " " + body.Message + " " + body.LastOutput), previous
 	case "run.cancelled":
 		var body struct {
 			Reason string `json:"reason"`

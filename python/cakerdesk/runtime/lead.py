@@ -13,8 +13,10 @@ def decide_after_model(ai: AIMessage, guard: dict) -> str:
     if names:
         return "tools"
     if int(guard.get("plain_text_streak") or 0) >= 3:
-        guard["fail_reason"] = "plain_text_loop"
-        guard["fail_message"] = "连续多次没有工具调用"
+        content = ai.content if isinstance(ai.content, str) else str(ai.content or "")
+        guard["fail_reason"] = "model_no_progress"
+        guard["fail_message"] = "模型连续多次没有产生工具调用，任务无法继续推进"
+        guard["last_output"] = content[:200]
         return "runtime_fail"
     return "lead_model"
 

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from cakerdesk.events import EventSink
-from cakerdesk.graph import build_graph, execute_run
-from cakerdesk.memory import MemoryStore
+from cakerdesk.infra.events import EventSink
+from cakerdesk.runtime.graph import build_graph, execute_run, fail_run
+from cakerdesk.runtime.memory import MemoryStore
 
 CANCEL_FLAGS: dict[str, bool] = {}
 
@@ -42,20 +43,30 @@ def create_app(
             CANCEL_FLAGS[body.run_id] = False
 
         async def _job() -> None:
-            await asyncio.to_thread(
-                execute_run,
-                project_id=body.project_id,
-                thread_id=body.thread_id,
-                run_id=body.run_id,
-                goal=body.goal,
-                workspace_root=body.workspace_root,
-                model=app.state.model,
-                memory=app.state.memory,
-                sink=app.state.sink,
-                graph=app.state.graph,
-                cancel_flags=CANCEL_FLAGS,
-                resume=resume,
-            )
+            try:
+                await asyncio.to_thread(
+                    execute_run,
+                    project_id=body.project_id,
+                    thread_id=body.thread_id,
+                    run_id=body.run_id,
+                    goal=body.goal,
+                    workspace_root=body.workspace_root,
+                    model=app.state.model,
+                    memory=app.state.memory,
+                    sink=app.state.sink,
+                    graph=app.state.graph,
+                    cancel_flags=CANCEL_FLAGS,
+                    resume=resume,
+                )
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError as exc:
+                if "没有可恢复的检查点" in str(exc):
+                    logging.getLogger("cakerdesk.main").error("%s", exc)
+                    return
+                fail_run(body.run_id, app.state.sink, exc)
+            except Exception as exc:
+                fail_run(body.run_id, app.state.sink, exc)
 
         app.state.tasks[body.run_id] = asyncio.create_task(_job())
         return {"run_id": body.run_id, "status": "accepted"}
@@ -64,10 +75,17 @@ def create_app(
     async def start_run(body: RunIn):
         return _start(body, resume=False)
 
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok"}
+
     @app.post("/internal/runs/{run_id}/resume", status_code=202)
     async def resume_run(run_id: str, body: RunIn):
         if body.run_id != run_id:
             raise HTTPException(status_code=400, detail="run_id mismatch")
+        snapshot = app.state.graph.get_state({"configurable": {"thread_id": body.thread_id}})
+        if not snapshot.next:
+            raise HTTPException(status_code=409, detail="No resumable checkpoint.")
         return _start(body, resume=True)
 
     @app.post("/internal/runs/{run_id}/cancel", status_code=202)
@@ -85,9 +103,9 @@ def create_app(
 def main() -> None:
     import uvicorn
 
-    from cakerdesk.graph import open_checkpointer
-    from cakerdesk.memory import open_memory
-    from cakerdesk.model import env_model
+    from cakerdesk.runtime.graph import open_checkpointer
+    from cakerdesk.runtime.memory import open_memory
+    from cakerdesk.infra.model import env_model
 
     database_url = os.environ.get("CAKERDESK_DATABASE_URL")
     app = create_app(

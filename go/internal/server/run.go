@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -109,7 +110,7 @@ func (s *Server) resumeRun(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if run.Status == "completed" || run.Status == "failed" || run.Status == "cancelled" {
+	if run.Status == "completed" || run.Status == "cancelled" {
 		c.JSON(http.StatusConflict, gin.H{"error": "run already finished"})
 		return
 	}
@@ -122,8 +123,16 @@ func (s *Server) resumeRun(c *gin.Context) {
 		ProjectID: run.ProjectID, ThreadID: run.ThreadID, RunID: run.ID, Goal: run.Goal, WorkspaceRoot: dir,
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "409") {
+			c.JSON(http.StatusConflict, gin.H{"error": "No resumable checkpoint."})
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
+	}
+	if run.Status == "failed" {
+		_ = s.Q.SetRunStatus(ctx, db.SetRunStatusParams{ID: run.ID, Status: "running"})
+		run.Status = "running"
 	}
 	c.JSON(http.StatusAccepted, runJSON(run))
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 type Options struct {
 	BaseURL string
 	Out     io.Writer
+	In      io.Reader
 }
 
 func Execute(args []string, opt Options) error {
@@ -117,17 +119,29 @@ func memory(args []string, opt Options) error {
 }
 
 func watch(opt Options, runID string) error {
+	_, err := followRun(context.Background(), opt, runID)
+	return err
+}
+
+func followRun(ctx context.Context, opt Options, runID string) (string, error) {
 	if runID == "" {
-		return fmt.Errorf("run watch --run")
+		return "", fmt.Errorf("run watch --run")
 	}
-	response, err := http.Get(strings.TrimRight(opt.BaseURL, "/") + "/api/runs/" + runID + "/events?after_seq=0")
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(opt.BaseURL, "/")+"/api/runs/"+runID+"/events?after_seq=0", nil)
 	if err != nil {
-		return err
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("watch %d %s", response.StatusCode, raw)
+		return "", fmt.Errorf("watch %d %s", response.StatusCode, raw)
 	}
 	scanner := bufio.NewScanner(response.Body)
 	var steps []stepView
@@ -141,13 +155,25 @@ func watch(opt Options, runID string) error {
 			Payload json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
-			return err
+			return "", err
 		}
 		text, next := projectLine(steps, event.Type, event.Payload)
 		steps = next
 		fmt.Fprintln(opt.Out, text)
+		if isTerminal(event.Type) {
+			return strings.TrimPrefix(event.Type, "run."), nil
+		}
 	}
-	return scanner.Err()
+	return "", scanner.Err()
+}
+
+func isTerminal(eventType string) bool {
+	switch eventType {
+	case "run.completed", "run.failed", "run.cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func showRun(opt Options, runID string) error {

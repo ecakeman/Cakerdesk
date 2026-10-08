@@ -12,14 +12,14 @@ import pytest
 import uvicorn
 from langchain_core.messages import AIMessage, HumanMessage
 
-from cakerdesk.context import CONTEXT_MARKER
-from cakerdesk.events import EventSink
-from cakerdesk.graph import build_graph, checkpoint_contains_context, execute_run
+from cakerdesk.runtime.context import CONTEXT_MARKER
+from cakerdesk.infra.events import EventSink
+from cakerdesk.runtime.graph import build_graph, checkpoint_contains_context, execute_run
 from cakerdesk.main import create_app
-from cakerdesk.memory import MemoryStore
-from cakerdesk.middleware import maybe_summarize
-from cakerdesk.plan import block_failed_steps, set_step_status
-from cakerdesk.state import fresh_guard
+from cakerdesk.runtime.memory import MemoryStore
+from cakerdesk.runtime.middleware import maybe_summarize
+from cakerdesk.runtime.plan import block_failed_steps, set_step_status
+from cakerdesk.runtime.state import fresh_guard
 from tests.demo_model import DemoModel
 
 NOTES = "请根据 sales.csv 写报告。必须包含数据摘要、异常点、结论。异常点不要和全文写作混在同一步。\n"
@@ -206,6 +206,32 @@ def test_init_failure_does_not_write_memory(tmp_path: Path):
     memory.close()
 
 
+def test_model_exception_emits_run_failed(tmp_path: Path):
+    class Rejecting(DemoModel):
+        def structured(self, messages, schema, *, purpose: str):
+            raise RuntimeError("provider rejected request")
+
+        def invoke(self, messages, tools=None, *, purpose: str = "lead"):
+            raise RuntimeError("provider rejected request")
+
+    sink = EventSink()
+    execute_run(
+        project_id="p-fail",
+        thread_id="t-fail",
+        run_id="run-fail",
+        goal=GOAL,
+        workspace_root=str(_workspace(tmp_path)),
+        model=Rejecting(),
+        memory=MemoryStore(),
+        sink=sink,
+        graph=build_graph(),
+    )
+    failed = [event for event in sink.events if event["type"] == "run.failed"]
+    assert failed
+    assert failed[-1]["payload"]["reason"] == "model_error"
+    assert "verification.completed" not in _types(sink)
+
+
 def test_plain_text_does_not_verify(tmp_path: Path):
     class TextThenStop(DemoModel):
         def invoke(self, messages, tools=None, *, purpose: str = "lead"):
@@ -230,7 +256,8 @@ def test_plain_text_does_not_verify(tmp_path: Path):
         graph=build_graph(),
     )
     assert "verification.completed" not in _types(sink)
-    assert sink.events[-1]["payload"]["reason"] == "plain_text_loop"
+    assert sink.events[-1]["payload"]["reason"] == "model_no_progress"
+    assert sink.events[-1]["payload"]["last_output"] == "还在想"
     assert memory.read_for_context("p-text") == []
     memory.close()
 
@@ -298,8 +325,8 @@ def test_resume_sees_persisted_cancel(tmp_path: Path):
 
 @pytest.mark.skipif(not os.environ.get("CAKERDESK_DATABASE_URL"), reason="需要 CAKERDESK_DATABASE_URL，不退回 SQLite")
 def test_postgres_resume_keeps_checkpoint_and_memory(tmp_path: Path):
-    from cakerdesk.graph import open_checkpointer
-    from cakerdesk.memory import open_memory
+    from cakerdesk.runtime.graph import open_checkpointer
+    from cakerdesk.runtime.memory import open_memory
 
     url = os.environ["CAKERDESK_DATABASE_URL"]
     checkpointer = open_checkpointer(url)
@@ -336,6 +363,59 @@ def tempfile_token():
 
 
 @pytest.mark.skipif(not os.environ.get("CAKERDESK_DATABASE_URL"), reason="需要 CAKERDESK_DATABASE_URL，不退回 SQLite")
+def test_resume_after_model_failure(tmp_path: Path):
+    root = _workspace(tmp_path)
+    env = os.environ.copy()
+    env.update({
+        "WS": str(root),
+        "THREAD": "fail-" + next(tempfile_token()),
+        "RUN": "run-model-fail",
+        "PROJECT": "fail-" + next(tempfile_token()),
+    })
+    script = r"""
+import os
+from pathlib import Path
+from cakerdesk.infra.events import EventSink
+from cakerdesk.runtime.graph import build_graph, execute_run, open_checkpointer
+from cakerdesk.runtime.memory import open_memory
+from tests.demo_model import DemoModel
+
+url = os.environ["CAKERDESK_DATABASE_URL"]
+root = Path(os.environ["WS"])
+graph = build_graph(open_checkpointer(url))
+common = dict(
+    project_id=os.environ["PROJECT"],
+    thread_id=os.environ["THREAD"],
+    run_id=os.environ["RUN"],
+    goal="根据 work/notes.txt 和 work/sales.csv，完成 artifacts/report.md。",
+    workspace_root=str(root),
+    memory=open_memory(url),
+    sink=EventSink(),
+    graph=graph,
+)
+if os.environ["PHASE"] == "start":
+    class Rejecting(DemoModel):
+        def structured(self, messages, schema, *, purpose: str):
+            raise RuntimeError("provider rejected request")
+    execute_run(model=Rejecting(), **common)
+    failed = [event for event in common["sink"].events if event["type"] == "run.failed"]
+    assert failed and failed[-1]["payload"]["reason"] == "model_error"
+    snapshot = graph.get_state({"configurable": {"thread_id": os.environ["THREAD"]}})
+    assert "ensure_contract" in snapshot.next
+else:
+    execute_run(model=DemoModel(), resume=True, **common)
+    assert "结论" in (root / "artifacts" / "report.md").read_text(encoding="utf-8")
+"""
+    python_root = Path(__file__).resolve().parents[1]
+    env["PHASE"] = "start"
+    first = subprocess.run([sys.executable, "-c", script], cwd=python_root, env=env, check=False, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    env["PHASE"] = "resume"
+    second = subprocess.run([sys.executable, "-c", script], cwd=python_root, env=env, check=False, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+
+
+@pytest.mark.skipif(not os.environ.get("CAKERDESK_DATABASE_URL"), reason="需要 CAKERDESK_DATABASE_URL，不退回 SQLite")
 def test_process_exit_then_resume(tmp_path: Path):
     root = _workspace(tmp_path)
     env = os.environ.copy()
@@ -349,9 +429,9 @@ def test_process_exit_then_resume(tmp_path: Path):
 import os
 from pathlib import Path
 from langchain_core.messages import HumanMessage
-from cakerdesk.events import EventSink
-from cakerdesk.graph import build_graph, execute_run, open_checkpointer
-from cakerdesk.memory import open_memory
+from cakerdesk.infra.events import EventSink
+from cakerdesk.runtime.graph import build_graph, execute_run, open_checkpointer
+from cakerdesk.runtime.memory import open_memory
 from tests.demo_model import DemoModel
 
 url = os.environ["CAKERDESK_DATABASE_URL"]

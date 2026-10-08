@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cakerdesk.workspace import WorkspaceError, resolve
+from cakerdesk.infra.workspace import WorkspaceError, resolve
 
 
 def verify(contract: dict, workspace_root: Path, messages: list | None = None) -> dict:

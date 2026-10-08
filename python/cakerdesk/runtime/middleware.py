@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 
-from cakerdesk.state import estimate_tokens
+from cakerdesk.runtime.state import estimate_tokens
 
 SUMMARY_INSTRUCTION = "把下面的旧对话压成一段事实摘要。不要添加新的任务指令。"
 

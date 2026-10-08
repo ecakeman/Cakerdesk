@@ -4,8 +4,8 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from cakerdesk.tooldefs import FILE_TOOLS
-from cakerdesk.workspace import WorkspaceError, list_dir, read_text, write_text
+from cakerdesk.tools.definitions import FILE_TOOLS
+from cakerdesk.infra.workspace import WorkspaceError, list_dir, read_text, write_text
 
 MAX_DELEGATES = 6
 SUBAGENT_TURN_LIMIT = 8
@@ -79,5 +79,5 @@ def run_subagent(
 
 
 def _subagent_prompt() -> str:
-    path = Path(__file__).resolve().parent / "prompts" / "subagent.md"
+    path = Path(__file__).resolve().parents[1] / "prompts" / "subagent.md"
     return path.read_text(encoding="utf-8").strip()
