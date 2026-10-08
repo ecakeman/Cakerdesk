@@ -5,19 +5,12 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from cakerdesk.events import EventSink
 from cakerdesk.plan import set_step_status
 from cakerdesk.subagent import MAX_DELEGATES, run_subagent
+from cakerdesk.tooldefs import LEAD_TOOLS
 from cakerdesk.workspace import WorkspaceError, list_dir, read_text, scan_artifacts, write_text
 
-LEAD_TOOLS = [
-    "list_dir",
-    "read_file",
-    "write_file",
-    "set_step_status",
-    "delegate_task",
-    "submit_for_verification",
-]
+__all__ = ["LEAD_TOOLS", "execute_tool_calls", "public_plan", "tool_sig"]
 
 
 def tool_sig(name: str, args: dict) -> str:
@@ -30,7 +23,7 @@ def execute_tool_calls(
     state: dict,
     workspace_root: Path,
     model,
-    sink: EventSink,
+    emit,
 ) -> dict:
     """执行除 submit 以外的工具。submit 只回一条 submitted，不产生业务副作用。"""
     messages = []
@@ -49,7 +42,7 @@ def execute_tool_calls(
         if name == "submit_for_verification":
             messages.append(ToolMessage(content="submitted", tool_call_id=call_id, id=f"submit-{call_id}"))
             continue
-        sink.emit(run_id, "tool.started", {"tool": name})
+        emit("tool.started", {"tool": name})
         status = "completed"
         try:
             if name == "read_file":
@@ -82,8 +75,7 @@ def execute_tool_calls(
                     contract_brief=brief,
                     model=model,
                     subagent_id=sub_id,
-                    sink=sink,
-                    run_id=run_id,
+                    emit=emit,
                 )
                 delegations.append(
                     {
@@ -103,7 +95,7 @@ def execute_tool_calls(
         except (WorkspaceError, ValueError, KeyError) as exc:
             status = "failed"
             summary = str(exc)
-        sink.emit(run_id, "tool.completed", {"tool": name, "status": status, "summary": _short(summary)})
+        emit("tool.completed", {"tool": name, "status": status, "summary": _short(summary)})
         messages.append(ToolMessage(content=summary[:8000], tool_call_id=call_id, id=f"tool-{call_id}", status="error" if status == "failed" else "success"))
         sig = tool_sig(name, args if isinstance(args, dict) else {})
         if sig == guard.get("last_tool_sig"):
@@ -124,7 +116,7 @@ def execute_tool_calls(
     if plan is not None:
         update["plan"] = plan
     if plan_changed and plan is not None:
-        sink.emit(run_id, "plan.updated", {"plan": _public_plan(plan)})
+        emit("plan.updated", {"plan": _public_plan(plan)})
     return update
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -9,14 +10,17 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, ValidationError
 
 from cakerdesk.context import CONTEXT_MARKER, ContextManager
-from cakerdesk.events import EventSink
+from cakerdesk.events import EventSink, fetch_run_status, publish
 from cakerdesk.lead import decide_after_model, decide_after_tools
 from cakerdesk.middleware import maybe_summarize
-from cakerdesk.plan import block_failed_steps, normalize_contract, normalize_plan, parse_json_object, validate_diff
+from cakerdesk.plan import block_failed_steps, normalize_contract, normalize_plan, validate_diff
+from cakerdesk.schemas import ContractOut, PlanOut, ReflectionOut
 from cakerdesk.state import AgentState, estimate_tokens, fresh_guard
-from cakerdesk.tools import LEAD_TOOLS, execute_tool_calls, public_plan
+from cakerdesk.tooldefs import LEAD_TOOLS
+from cakerdesk.tools import execute_tool_calls, public_plan
 from cakerdesk.verify import verify
 from cakerdesk.workspace import ensure_layout, scan_artifacts
 
@@ -62,14 +66,18 @@ def build_graph(checkpointer=None):
     graph.add_conditional_edges(
         "lead_tools",
         _route,
-        {"lead_model": "lead_model", "verify": "verify", "runtime_fail": "reflect"},
+        {"lead_model": "lead_model", "verify": "verify", "runtime_fail": "reflect", "cancel": "emit_cancelled"},
     )
     graph.add_conditional_edges(
         "verify",
         _route,
-        {"reflect": "reflect", "replan": "replan", "runtime_fail": "reflect"},
+        {"reflect": "reflect", "replan": "replan", "runtime_fail": "reflect", "cancel": "emit_cancelled"},
     )
-    graph.add_conditional_edges("replan", _route, {"lead_model": "lead_model", "runtime_fail": "reflect"})
+    graph.add_conditional_edges(
+        "replan",
+        _route,
+        {"lead_model": "lead_model", "runtime_fail": "reflect", "cancel": "emit_cancelled"},
+    )
     graph.add_conditional_edges("reflect", _route, {"emit_completed": "emit_completed", "emit_failed": "emit_failed"})
     graph.add_edge("emit_completed", END)
     graph.add_edge("emit_failed", END)
@@ -92,6 +100,9 @@ def execute_run(
     skill_root: Path | None = None,
     summarize_message_count: int = 24,
     graph=None,
+    resume: bool = False,
+    interrupt_after: list[str] | None = None,
+    status_lookup=None,
 ) -> dict:
     root = Path(workspace_root)
     ensure_layout(root)
@@ -110,10 +121,49 @@ def execute_run(
             "cancel_flags": cancel_flags or {},
             "skill_names": load_skill_names(skill_root or Path("skills")),
             "summarize_message_count": summarize_message_count,
+            "go_url": sink.post_url,
+            "status_lookup": status_lookup,
         },
         "recursion_limit": 80,
     }
-    return compiled.invoke({}, config)
+    incoming: dict | None = {}
+    if resume:
+        snapshot = compiled.get_state(config)
+        if not snapshot.next:
+            raise RuntimeError("没有可恢复的检查点")
+        if _cancelled(config):
+            sink.emit(run_id, "run.cancelled", {"reason": "user_cancelled"})
+            return snapshot.values
+        incoming = None
+    final = None
+    for item in compiled.stream(
+        incoming,
+        config,
+        stream_mode=["values", "custom"],
+        durability="sync",
+        interrupt_after=interrupt_after,
+    ):
+        mode, chunk = item
+        if mode == "custom":
+            sink.emit(chunk["run_id"], chunk["type"], chunk["payload"])
+        else:
+            final = chunk
+    if final is None:
+        final = compiled.get_state(config).values or {}
+    return final
+
+
+def open_checkpointer(database_url: str | None):
+    if not database_url:
+        raise RuntimeError("CAKERDESK_DATABASE_URL 未设置，不使用内存 Checkpoint 作为产品存储")
+    os.environ["LANGGRAPH_STRICT_MSGPACK"] = "true"
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    context = PostgresSaver.from_conn_string(database_url)
+    saver = context.__enter__()
+    saver.setup()
+    saver._cakerdesk_context = context
+    return saver
 
 
 def _cfg(config: RunnableConfig) -> dict:
@@ -131,16 +181,56 @@ def _last_ai(state: AgentState) -> AIMessage:
     raise RuntimeError("没有模型消息")
 
 
-def _call_model(state: AgentState, config: RunnableConfig, purpose: str, tools: list | None):
+def _cancelled(config: RunnableConfig) -> bool:
+    cfg = _cfg(config)
+    if cfg["cancel_flags"].get(cfg["run_id"]):
+        return True
+    lookup = cfg.get("status_lookup")
+    if lookup is not None:
+        return lookup(cfg["run_id"]) == "cancel_requested"
+    return fetch_run_status(cfg.get("go_url"), cfg["run_id"]) == "cancel_requested"
+
+
+def _prompt(purpose: str) -> str:
+    path = Path(__file__).resolve().parent / "prompts" / f"{purpose}.md"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    from cakerdesk.context import RULES
+
+    return RULES
+
+
+def _messages_for(state: AgentState, config: RunnableConfig, purpose: str) -> list:
     cfg = _cfg(config)
     memory_rows = cfg["memory"].read_for_context(cfg["project_id"])
-    messages = cfg["context"].build(state, memory_rows, skill_names=cfg["skill_names"])
-    response = cfg["model"].invoke(messages, tools=tools, purpose=purpose)
+    return cfg["context"].build(state, memory_rows, skill_names=cfg["skill_names"], rules=_prompt(purpose))
+
+
+def _as_ai(response, purpose: str) -> AIMessage:
     if not isinstance(response, AIMessage):
         response = AIMessage(content=str(response))
     response.id = response.id or f"{purpose}-{uuid.uuid4().hex[:8]}"
+    return response
+
+
+def _call_model(state: AgentState, config: RunnableConfig, purpose: str, tools: list | None):
+    response = _as_ai(_cfg(config)["model"].invoke(_messages_for(state, config, purpose), tools=tools, purpose=purpose), purpose)
     _charge(state, response)
     return response
+
+
+def _structured(state: AgentState, config: RunnableConfig, purpose: str, schema, extra: list | None = None):
+    messages = _messages_for(state, config, purpose)
+    if extra:
+        messages = [*messages, *extra]
+    try:
+        parsed = _cfg(config)["model"].structured(messages, schema, purpose=purpose)
+        data = parsed if isinstance(parsed, BaseModel) else schema.model_validate(parsed)
+    except (AttributeError, ValidationError, ValueError, TypeError) as exc:
+        raise ValueError(str(exc)) from exc
+    response = AIMessage(content=data.model_dump_json(), id=f"{purpose}-{uuid.uuid4().hex[:8]}")
+    _charge(state, response)
+    return response, data.model_dump()
 
 
 def _charge(state: AgentState, response: AIMessage) -> None:
@@ -157,7 +247,7 @@ def bootstrap(state: AgentState, config: RunnableConfig) -> dict:
     root = Path(cfg["workspace_root"])
     ensure_layout(root)
     guard = fresh_guard(cfg["run_id"])
-    cfg["sink"].emit(cfg["run_id"], "run.started", {"goal": cfg["goal"]})
+    publish(config, "run.started", {"goal": cfg["goal"]})
     return {
         "messages": [HumanMessage(content=cfg["goal"], id=f"goal-{cfg['run_id']}")],
         "findings": None,
@@ -176,13 +266,14 @@ def ensure_contract(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
     guard = dict(state["guard"])
     state = {**state, "guard": guard}
-    response = _call_model(state, config, "contract", None)
+    response = None
     try:
-        contract = normalize_contract(parse_json_object(_text(response)), cfg["goal"])
-    except (ValueError, json.JSONDecodeError) as exc:
+        response, raw = _structured(state, config, "contract", ContractOut)
+        contract = normalize_contract(raw, cfg["goal"])
+    except ValueError as exc:
         guard["fail_reason"] = "invalid_contract"
         guard["fail_message"] = str(exc)
-        return {"messages": [response], "guard": guard, "route": "emit_failed"}
+        return {"messages": [response] if response else [], "guard": guard, "route": "emit_failed"}
     return {"messages": [response], "contract": contract, "guard": guard, "route": "ensure_plan"}
 
 
@@ -190,21 +281,22 @@ def ensure_plan(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
     guard = dict(state["guard"])
     state = {**state, "guard": guard}
-    response = _call_model(state, config, "plan", None)
+    response = None
     try:
-        plan = normalize_plan(parse_json_object(_text(response)), version=1)
+        response, raw = _structured(state, config, "plan", PlanOut)
+        plan = normalize_plan(raw, version=1)
         plan["diff"] = None
-    except (ValueError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
         guard["fail_reason"] = "invalid_plan"
         guard["fail_message"] = str(exc)
-        return {"messages": [response], "guard": guard, "route": "emit_failed"}
-    cfg["sink"].emit(cfg["run_id"], "plan.updated", {"plan": public_plan(plan)})
+        return {"messages": [response] if response else [], "guard": guard, "route": "emit_failed"}
+    publish(config, "plan.updated", {"plan": public_plan(plan)})
     return {"messages": [response], "plan": plan, "guard": guard, "route": "lead_model"}
 
 
 def lead_model(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
-    if cfg["cancel_flags"].get(cfg["run_id"]):
+    if _cancelled(config):
         return {"route": "cancel", "guard": state["guard"]}
     guard = dict(state["guard"])
     working = {**state, "guard": guard}
@@ -225,7 +317,7 @@ def lead_model(state: AgentState, config: RunnableConfig) -> dict:
     response = _call_model(working, config, "lead", LEAD_TOOLS)
     content = _text(response)
     if content and not response.tool_calls:
-        cfg["sink"].emit(cfg["run_id"], "model.message", {"role": "assistant", "content": content})
+        publish(config, "model.message", {"role": "assistant", "content": content})
         guard["plain_text_streak"] = int(guard.get("plain_text_streak") or 0) + 1
     elif response.tool_calls:
         guard["plain_text_streak"] = 0
@@ -240,13 +332,15 @@ def lead_model(state: AgentState, config: RunnableConfig) -> dict:
 
 def lead_tools(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
+    if _cancelled(config):
+        return {"route": "cancel", "guard": state["guard"]}
     ai = _last_ai(state)
     update = execute_tool_calls(
         ai=ai,
         state=state,
         workspace_root=Path(cfg["workspace_root"]),
         model=cfg["model"],
-        sink=cfg["sink"],
+        emit=lambda event_type, payload: publish(config, event_type, payload),
     )
     guard = update["guard"]
     route = decide_after_tools(ai, guard)
@@ -258,6 +352,8 @@ def lead_tools(state: AgentState, config: RunnableConfig) -> dict:
 
 def verify_node(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
+    if _cancelled(config):
+        return {"route": "cancel", "guard": state["guard"]}
     findings = verify(state.get("contract") or {}, Path(cfg["workspace_root"]), state.get("messages"))
     attempts = list(state.get("attempts") or [])
     attempt_no = 1 + sum(1 for item in attempts if item.get("kind") == "verification")
@@ -275,12 +371,12 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
     if not findings["passed"] and plan:
         blocked = block_failed_steps(plan, findings)
         if blocked != plan:
-            cfg["sink"].emit(cfg["run_id"], "plan.updated", {"plan": public_plan(blocked)})
+            publish(config, "plan.updated", {"plan": public_plan(blocked)})
         plan = blocked
     guard = dict(state["guard"])
     guard["executed"] = True
-    cfg["sink"].emit(
-        cfg["run_id"],
+    publish(
+        config,
         "verification.completed",
         {"passed": findings["passed"], "findings": findings["items"]},
     )
@@ -301,22 +397,26 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
 
 def replan_node(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
-    cfg["sink"].emit(cfg["run_id"], "replan.started", {"reason": "verification_failed"})
+    if _cancelled(config):
+        return {"route": "cancel", "guard": state["guard"]}
+    publish(config, "replan.started", {"reason": "verification_failed"})
     guard = dict(state["guard"])
     working = {**state, "guard": guard}
     response = None
     plan = None
     error = ""
     for _ in range(2):
-        response = _call_model(working, config, "replan", None)
+        response = None
         try:
-            plan = normalize_plan(parse_json_object(_text(response)), version=int(state["plan"]["version"]) + 1)
+            response, raw = _structured(working, config, "replan", PlanOut)
+            plan = normalize_plan(raw, version=int(state["plan"]["version"]) + 1)
             validate_diff(state["plan"], plan)
             error = ""
             break
-        except (ValueError, json.JSONDecodeError) as exc:
+        except ValueError as exc:
             error = str(exc)
-            working = {**working, "messages": [*(working.get("messages") or []), response]}
+            if response is not None:
+                working = {**working, "messages": [*(working.get("messages") or []), response]}
     if error or plan is None:
         guard["fail_reason"] = "invalid_replan"
         guard["fail_message"] = error or "重规划失败"
@@ -332,7 +432,7 @@ def replan_node(state: AgentState, config: RunnableConfig) -> dict:
             "plan_version": plan["version"],
         }
     )
-    cfg["sink"].emit(cfg["run_id"], "plan.updated", {"plan": public_plan(plan)})
+    publish(config, "plan.updated", {"plan": public_plan(plan)})
     return {"messages": [response], "plan": plan, "attempts": attempts, "guard": guard, "route": "lead_model"}
 
 
@@ -343,17 +443,12 @@ def reflect_node(state: AgentState, config: RunnableConfig) -> dict:
         if guard.get("fail_reason"):
             return {"guard": guard, "route": "emit_failed"}
     mode = guard.get("reflect_mode") or "full"
-    memory_rows = cfg["memory"].read_for_context(cfg["project_id"])
-    messages = cfg["context"].build(state, memory_rows, skill_names=cfg["skill_names"])
-    messages.append(SystemMessage(content="Attempts\n" + json.dumps(state.get("attempts") or [], ensure_ascii=False)))
-    response = cfg["model"].invoke(messages, tools=None, purpose="reflect")
-    if not isinstance(response, AIMessage):
-        response = AIMessage(content=str(response))
-    response.id = response.id or f"reflect-{uuid.uuid4().hex[:8]}"
-    _charge({**state, "guard": guard}, response)
+    extra = [SystemMessage(content="Attempts\n" + json.dumps(state.get("attempts") or [], ensure_ascii=False))]
     try:
-        raw_items = parse_json_object(_text(response)).get("items") or []
-    except (ValueError, json.JSONDecodeError):
+        response, raw = _structured({**state, "guard": guard}, config, "reflect", ReflectionOut, extra=extra)
+        raw_items = raw.get("items") or []
+    except ValueError:
+        response = AIMessage(content="", id=f"reflect-{uuid.uuid4().hex[:8]}")
         raw_items = []
     items = []
     for item in raw_items:
@@ -364,8 +459,8 @@ def reflect_node(state: AgentState, config: RunnableConfig) -> dict:
             items.append({"kind": kind, "content": str(item["content"]).strip()})
     written = cfg["memory"].write(cfg["project_id"], cfg["run_id"], items[:5])
     for row in written:
-        cfg["sink"].emit(
-            cfg["run_id"],
+        publish(
+            config,
             "memory.written",
             {"kind": row["kind"], "summary": row["content"][:120]},
         )
@@ -375,8 +470,8 @@ def reflect_node(state: AgentState, config: RunnableConfig) -> dict:
 
 def emit_completed(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
-    cfg["sink"].emit(
-        cfg["run_id"],
+    publish(
+        config,
         "run.completed",
         {"summary": "任务完成", "artifacts": list(state.get("artifacts") or [])},
     )
@@ -386,8 +481,8 @@ def emit_completed(state: AgentState, config: RunnableConfig) -> dict:
 def emit_failed(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
     guard = state.get("guard") or {}
-    cfg["sink"].emit(
-        cfg["run_id"],
+    publish(
+        config,
         "run.failed",
         {
             "reason": guard.get("fail_reason") or "failed",
@@ -399,7 +494,7 @@ def emit_failed(state: AgentState, config: RunnableConfig) -> dict:
 
 def emit_cancelled(state: AgentState, config: RunnableConfig) -> dict:
     cfg = _cfg(config)
-    cfg["sink"].emit(cfg["run_id"], "run.cancelled", {"reason": "user_cancelled"})
+    publish(config, "run.cancelled", {"reason": "user_cancelled"})
     return {"route": "done"}
 
 

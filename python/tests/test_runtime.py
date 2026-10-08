@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import urllib.request
@@ -63,7 +64,7 @@ def test_verify_fail_blocks_completed_step():
 def test_demo_run_closes_the_loop(tmp_path: Path):
     root = _workspace(tmp_path)
     model = DemoModel()
-    memory = MemoryStore(tmp_path / "memory.sqlite")
+    memory = MemoryStore()
     sink = EventSink()
     graph = build_graph()
     result = execute_run(
@@ -182,7 +183,7 @@ def test_init_failure_does_not_write_memory(tmp_path: Path):
         def invoke(self, messages, tools=None, *, purpose: str = "lead"):
             return AIMessage(content="无法生成契约")
 
-    memory = MemoryStore(tmp_path / "memory.sqlite")
+    memory = MemoryStore()
     sink = EventSink()
     root = _workspace(tmp_path)
     execute_run(
@@ -212,7 +213,7 @@ def test_plain_text_does_not_verify(tmp_path: Path):
                 return AIMessage(content="还在想")
             return super().invoke(messages, tools, purpose=purpose)
 
-    memory = MemoryStore(tmp_path / "memory.sqlite")
+    memory = MemoryStore()
     sink = EventSink()
     model = TextThenStop()
     execute_run(
@@ -232,17 +233,122 @@ def test_plain_text_does_not_verify(tmp_path: Path):
     memory.close()
 
 
+def test_event_seq_restarts_for_each_run():
+    sink = EventSink()
+    first = sink.emit("run-a", "run.started", {})
+    second = sink.emit("run-b", "run.started", {})
+    third = sink.emit("run-a", "tool.started", {"tool": "read_file"})
+    assert first["seq"] == 1
+    assert second["seq"] == 1
+    assert third["seq"] == 2
+
+
+def test_resume_continues_without_resetting_plan(tmp_path: Path):
+    root = _workspace(tmp_path)
+    model = DemoModel()
+    graph = build_graph()
+    common = dict(
+        project_id="p1",
+        thread_id="t-resume",
+        run_id="run-resume",
+        goal=GOAL,
+        workspace_root=str(root),
+        model=model,
+        memory=MemoryStore(),
+        graph=graph,
+    )
+    partial = execute_run(sink=EventSink(), interrupt_after=["ensure_plan"], **common)
+    assert partial["plan"]["steps"][3]["title"] == "撰写 report.md"
+    humans = [message for message in partial["messages"] if isinstance(message, HumanMessage)]
+    assert len(humans) == 1
+    sink = EventSink()
+    result = execute_run(sink=sink, resume=True, **common)
+    report = (root / "artifacts" / "report.md").read_text(encoding="utf-8")
+    assert "结论" in report
+    assert result["plan"]["steps"][0]["title"] == "阅读 notes.txt"
+    snapshot = graph.get_state({"configurable": {"thread_id": "t-resume"}})
+    humans = [message for message in snapshot.values["messages"] if isinstance(message, HumanMessage)]
+    assert len(humans) == 1
+
+
+def test_resume_sees_persisted_cancel(tmp_path: Path):
+    root = _workspace(tmp_path)
+    model = DemoModel()
+    graph = build_graph()
+    common = dict(
+        project_id="p1",
+        thread_id="t-cancel",
+        run_id="run-cancel",
+        goal=GOAL,
+        workspace_root=str(root),
+        model=model,
+        memory=MemoryStore(),
+        graph=graph,
+    )
+    execute_run(sink=EventSink(), interrupt_after=["ensure_plan"], **common)
+    sink = EventSink()
+    execute_run(sink=sink, resume=True, status_lookup=lambda _run_id: "cancel_requested", **common)
+    assert sink.events[-1]["type"] == "run.cancelled"
+    assert model.lead_n == 0
+    snapshot = graph.get_state({"configurable": {"thread_id": "t-cancel"}})
+    assert snapshot.values["plan"]["steps"][0]["id"] == "s1"
+
+
+@pytest.mark.skipif(not os.environ.get("CAKERDESK_DATABASE_URL"), reason="需要 CAKERDESK_DATABASE_URL，不退回 SQLite")
+def test_postgres_resume_keeps_checkpoint_and_memory(tmp_path: Path):
+    from cakerdesk.graph import open_checkpointer
+    from cakerdesk.memory import open_memory
+
+    url = os.environ["CAKERDESK_DATABASE_URL"]
+    checkpointer = open_checkpointer(url)
+    memory = open_memory(url)
+    root = _workspace(tmp_path)
+    model = DemoModel()
+    thread_id = "pg-" + next(tempfile_token())
+    graph = build_graph(checkpointer)
+    common = dict(
+        project_id="pg-project",
+        thread_id=thread_id,
+        run_id="pg-run",
+        goal=GOAL,
+        workspace_root=str(root),
+        model=model,
+        memory=memory,
+        graph=graph,
+    )
+    partial = execute_run(sink=EventSink(), interrupt_after=["ensure_plan"], **common)
+    assert partial["plan"]["steps"][0]["id"] == "s1"
+    execute_run(sink=EventSink(), resume=True, **common)
+    assert "结论" in (root / "artifacts" / "report.md").read_text(encoding="utf-8")
+    again = build_graph(checkpointer)
+    snapshot = again.get_state({"configurable": {"thread_id": thread_id}})
+    assert snapshot.values["plan"]["steps"][0]["title"] == "阅读 notes.txt"
+    assert any(row["kind"] == "lesson" for row in memory.read_for_context("pg-project"))
+
+
+def tempfile_token():
+    import uuid
+
+    while True:
+        yield uuid.uuid4().hex[:8]
+
+
 def test_start_returns_202_before_run_finishes(tmp_path: Path):
     started = threading.Event()
     release = threading.Event()
 
     class Blocking:
+        def structured(self, messages, schema, *, purpose: str):
+            started.set()
+            release.wait(5)
+            raise ValueError("stop")
+
         def invoke(self, messages, tools=None, *, purpose: str = "lead"):
             started.set()
             release.wait(5)
             return AIMessage(content="not-json")
 
-    app = create_app(Blocking(), memory=MemoryStore(tmp_path / "memory.sqlite"), sink=EventSink(), graph=build_graph())
+    app = create_app(Blocking(), memory=MemoryStore(), sink=EventSink(), graph=build_graph())
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]

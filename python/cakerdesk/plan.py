@@ -4,14 +4,6 @@ import json
 from typing import Any
 
 
-def parse_json_object(text: str) -> dict:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("模型没有返回 JSON 对象")
-    return json.loads(text[start : end + 1])
-
-
 def normalize_contract(raw: dict, goal: str) -> dict:
     deliverables = raw.get("deliverables") or []
     cleaned = []

@@ -36,12 +36,20 @@ def _dump(value: Any) -> str:
 
 
 class ContextManager:
-    def build(self, state: dict, memory_rows: list[dict], *, skill_names: list[str] | None = None) -> list[BaseMessage]:
-        sections = self.apply_budget(self._sections(state, memory_rows, skill_names or []))
+    def build(
+        self,
+        state: dict,
+        memory_rows: list[dict],
+        *,
+        skill_names: list[str] | None = None,
+        rules: str | None = None,
+    ) -> list[BaseMessage]:
+        rules = rules or RULES
+        sections = self.apply_budget(self._sections(state, memory_rows, skill_names or []), rules=rules)
         context = "\n\n".join(part for part in sections if part)
         recent = self._fit_messages(list(state.get("messages") or []), token_room=4000)
         return [
-            SystemMessage(content=RULES),
+            SystemMessage(content=rules),
             SystemMessage(content=f"{CONTEXT_MARKER}\n{context}"),
             *recent,
         ]
@@ -73,9 +81,9 @@ class ContextManager:
             ("skills", "Skills\n" + (skills or "（无）"), 200, False),
         ]
 
-    def apply_budget(self, sections: list[tuple[str, str, int, bool]], total: int = 12000) -> list[str]:
+    def apply_budget(self, sections: list[tuple[str, str, int, bool]], total: int = 12000, rules: str = RULES) -> list[str]:
         rendered: list[str] = []
-        used = estimate_tokens(RULES)
+        used = estimate_tokens(rules)
         for name, text, cap, drop_front in sections:
             body = text
             if name == "memory" and drop_front:

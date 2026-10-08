@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from langchain_core.messages import AIMessage
 
 
@@ -19,17 +17,15 @@ class DemoModel:
         self.run_b = False
         self.b_lead = 0
 
-    def invoke(self, messages, tools=None, *, purpose: str = "lead"):
+    def structured(self, messages, schema, *, purpose: str):
         self.calls.append({"purpose": purpose, "messages": messages})
-        if purpose == "summary":
-            return AIMessage(content="已阅读资料并写过一版报告。")
         if purpose == "contract":
-            return AIMessage(content=json.dumps({
+            return schema.model_validate({
                 "goal": "完成周销售报告",
                 "deliverables": [{"path": "artifacts/report.md", "must_contain": ["数据摘要", "异常点", "结论"]}],
-            }, ensure_ascii=False))
+            })
         if purpose == "plan":
-            return AIMessage(content=json.dumps({
+            return schema.model_validate({
                 "goal": "完成周销售报告",
                 "steps": [
                     {"id": "s1", "title": "阅读 notes.txt", "status": "pending"},
@@ -37,9 +33,9 @@ class DemoModel:
                     {"id": "s3", "title": "委派异常点分析", "status": "pending"},
                     {"id": "s4", "title": "撰写 report.md", "status": "pending"},
                 ],
-            }, ensure_ascii=False))
+            })
         if purpose == "replan":
-            return AIMessage(content=json.dumps({
+            return schema.model_validate({
                 "goal": "完成周销售报告",
                 "steps": [
                     {"id": "s1", "title": "阅读 notes.txt", "status": "completed"},
@@ -48,17 +44,23 @@ class DemoModel:
                     {"id": "s4", "title": "补写结论，保留已有两节", "status": "pending"},
                     {"id": "s5", "title": "对照三个标题后再次提交", "status": "pending"},
                 ],
-            }, ensure_ascii=False))
+            })
         if purpose == "reflect":
             blob = "\n".join(_text(message) for message in messages)
             if "正文没有" not in blob:
-                return AIMessage(content=json.dumps({"items": []}, ensure_ascii=False))
-            return AIMessage(content=json.dumps({
+                return schema.model_validate({"items": []})
+            return schema.model_validate({
                 "items": [
                     {"kind": "fact", "content": "周销售报告必须包含数据摘要、异常点、结论三个部分。"},
                     {"kind": "lesson", "content": "首次提交虽然生成了报告文件，但遗漏了结论，因此验证失败；重新规划后补写结论并再次提交，最终通过验证。"},
                 ]
-            }, ensure_ascii=False))
+            })
+        raise AssertionError(f"意外的结构化调用 {purpose}")
+
+    def invoke(self, messages, tools=None, *, purpose: str = "lead"):
+        self.calls.append({"purpose": purpose, "messages": messages})
+        if purpose == "summary":
+            return AIMessage(content="已阅读资料并写过一版报告。")
         if purpose == "subagent":
             self.sub_n += 1
             if self.sub_n == 1:

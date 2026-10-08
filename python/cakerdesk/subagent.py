@@ -4,7 +4,7 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from cakerdesk.events import EventSink
+from cakerdesk.tooldefs import FILE_TOOLS
 from cakerdesk.workspace import WorkspaceError, list_dir, read_text, write_text
 
 MAX_DELEGATES = 6
@@ -18,24 +18,21 @@ def run_subagent(
     contract_brief: str,
     model,
     subagent_id: str,
-    sink: EventSink,
-    run_id: str,
+    emit,
 ) -> dict:
     """独立消息列表。返回时这份列表被丢掉，不写入父 checkpoint。"""
-    sink.emit(run_id, "subagent.started", {"subagent_id": subagent_id, "task": task})
+    emit("subagent.started", {"subagent_id": subagent_id, "task": task})
+    prompt = _subagent_prompt()
     messages: list = [
         HumanMessage(
-            content=(
-                "你是一次任务的子执行者，没有计划，也不能再委派。"
-                f"\n契约摘要：{contract_brief}\n任务：{task}"
-            ),
+            content=f"{prompt}\n契约摘要：{contract_brief}\n任务：{task}",
             id=f"{subagent_id}-task",
         )
     ]
     summary = ""
     status = "completed"
     for turn in range(SUBAGENT_TURN_LIMIT):
-        ai = model.invoke(messages, tools=_FILE_TOOLS, purpose="subagent")
+        ai = model.invoke(messages, tools=FILE_TOOLS, purpose="subagent")
         if not isinstance(ai, AIMessage):
             ai = AIMessage(content=str(ai))
         ai.id = ai.id or f"{subagent_id}-ai-{turn}"
@@ -74,16 +71,13 @@ def run_subagent(
     if not summary:
         summary = "子执行者没有给出结果"
         status = "failed"
-    sink.emit(
-        run_id,
+    emit(
         "subagent.completed",
         {"subagent_id": subagent_id, "status": status, "summary": summary[:200]},
     )
     return {"status": status, "summary": summary[:4000], "messages": messages}
 
 
-_FILE_TOOLS = [
-    {"name": "read_file", "args": {"path": ""}},
-    {"name": "write_file", "args": {"path": "", "content": ""}},
-    {"name": "list_dir", "args": {"path": ""}},
-]
+def _subagent_prompt() -> str:
+    path = Path(__file__).resolve().parent / "prompts" / "subagent.md"
+    return path.read_text(encoding="utf-8").strip()
