@@ -2,7 +2,7 @@
 
 本文是后续实现的施工图，不是待办大全。架构按本文落地，不另起一套结构。实现时按第 25 章收敛：主线行为已经能跑、能影响下一步、能在演示里看见，就停。不要因为 DeerFlow 还有更多字段、middleware 或抽象就继续补。
 
-代码尚未编写。新项目目录是 `/home/sancho/projects/cakerdesk-next`。本地旧 Cakerdesk 实验仓不作为依据。
+代码按本文收敛。目录是 `/home/sancho/projects/cakerdesk-next`。本地旧 Cakerdesk 实验仓不作为依据。
 
 参照实现是 [bytedance/deer-flow](https://github.com/bytedance/deer-flow) 的 `backend/packages/harness/deerflow/`，阅读范围包括 Lead Agent、`ThreadState`、`DurableContextMiddleware`、Summarization、Memory、Subagent Executor、Workspace 和相关 middleware。
 
@@ -12,7 +12,7 @@
 
 Cakerdesk 是一个用来展示 Long-Horizon Agent Runtime 的技术展品，不是生产级 Agent 平台。
 
-一次 Run 要能持续做完一件多步任务：读资料、调用工具、把局部工作交给 Subagent、写出文件、在自称完成之后被独立检查、检查失败后改计划再继续、把值得留下的经验写入项目记忆，并在下一次 Run 的模型输入里重新出现。页面要能看出这条过程，而不是只看到最后一句回答。
+一次 Run 要能持续做完一件多步任务：读资料、调用工具、把局部工作交给 Subagent、写出文件、在自称完成之后被独立检查、检查失败后改计划再继续、把值得留下的经验写入项目记忆，并在下一次 Run 的模型输入里重新出现。CLI 要能看出这条过程，而不是只看到最后一句回答。
 
 优先级：
 
@@ -23,7 +23,7 @@ Cakerdesk 是一个用来展示 Long-Horizon Agent Runtime 的技术展品，不
 >
 一条完整展示主线跑通
 >
-UI 能看出 Agent 在持续工作
+展示层能看出 Agent 在持续工作
 >
 工程完整度
 >
@@ -32,9 +32,9 @@ UI 能看出 Agent 在持续工作
 
 职责切分：
 
-- Go 保存产品状态：Project、Thread、Message、Run、Event、Workspace 与 Artifact 的 metadata。
+- Go 保存产品状态：Project、Thread、Message、Run、Event。Artifact 的正文在磁盘上，Run 只留路径快照。
 - Python 做 Agent 决策和执行：LangGraph、Checkpoint、Lead、Context、Memory、Plan、Verification、Replan、Subagent、Reflection。
-- 前端只消费 Go 的产品和事件，投影成画面。
+- CLI 只消费 Go 的产品和事件，投影成输出。
 
 技术选型已经定下：LangGraph、PostgreSQL Checkpoint、PostgreSQL Project Memory、Go 与 Python 之间的 HTTP、本地 Workspace。不做向量检索。
 
@@ -56,10 +56,10 @@ DeerFlow 的完成判断不能照搬。`create_agent` 在模型不再发出 tool
 | `ThreadState` + PostgreSQL checkpointer | 照搬核心机制 | Checkpoint 保存消息、contract、plan、summary、findings、artifacts、delegations、guard | 长任务的事实必须能在进程重启后继续。字段按本展品的闭环裁过，不搬 sandbox / viewed_images / promoted tools |
 | `DurableContextMiddleware.wrap_model_call` 只改当次请求 | 照搬核心机制 | `ContextMiddleware` 调用 `ContextManager`，`request.override` 出 `messages_for_llm`，不返回 messages 的 state 更新 | 这是 DeerFlow 里已经验证过的边界。把拼好的上下文写回 `state.messages` 会进 Checkpoint 并逐轮重复 |
 | Summarization：摘要 + 删除旧消息 | 照搬核心机制 | 超过阈值时写 `state.summary`，并从 `messages` 删除已被摘要覆盖的旧消息 | 只赋值 summary、不动 messages，历史仍会无限增长 |
-| Memory：抽取 facts，下一轮注入 system | 改造 | Reflection 在 Run 终态写 PostgreSQL `project_memory`。种类只有 `fact` 和 `lesson`。下次按 project 取最近 N 条，由 Context 注入 | DeerFlow 默认是 `memory.json`，还有工具式 CRUD、置信度、向量无关但很重的队列。展品要的是跨 Run 闭环，存储必须跟已定的 PostgreSQL 一致 |
+| Memory：抽取 facts，下一轮注入 system | 改造 | Reflection 在 Run 终态写入 LangGraph `PostgresStore`，命名空间 `("project", project_id, "memory")`。种类只有 `fact` 和 `lesson`。下次按 project 取最近 N 条，由 Context 注入 | DeerFlow 默认是 `memory.json`，还有工具式 CRUD、置信度、向量无关但很重的队列。展品要的是跨 Run 闭环，存储用已定的 PostgreSQL，不自建第二套记忆表 |
 | `runtime/goal.py` 用小模型看对话决定是否再跑 | 删除 | 完成闸门是 submit + Verifier | 目标是否达到由契约和文件证据决定，不由模型自述决定 |
 | Plan mode 的 `todos` | 改造 | `plan.steps` 加 status；失败后 `Replan` 节点写 PlanDiff | 清单本身不能表达「保留完成步骤、重开失败步骤」 |
-| Subagent executor，结果回父级 tool message | 缩减 | 一个通用 executor。独立 messages、独立模型调用。不写 Memory，不跑 Verify，不能再 delegate。并发 3，单 Run 最多 6 | 保留隔离和回收。去掉 general-purpose / bash 等角色、验收清单框架和子代理自己的摘要进父记忆 |
+| Subagent executor，结果回父级 tool message | 缩减 | 一个通用 executor。独立 messages、独立模型调用。不写 Memory，不跑 Verify，不能再 delegate。`max_concurrent = 1`，单 Run 最多 6 | 保留隔离和回收。去掉 general-purpose / bash 等角色、验收清单框架和子代理自己的摘要进父记忆 |
 | uploads / workspace / outputs | 改造 | `uploads/`、`work/`、`artifacts/`。工具读写真实路径，Verifier 再 `stat` 磁盘 | 目录名按展品约定。不引入 sandbox provider |
 | Title、Clarification、ViewImage、Sandbox、Uploads middleware | 删除 | 无 | 不服务这条长任务主线 |
 | Skill 发现与正文注入 | 只留痕迹 | 启动时若 `skills/*/SKILL.md` 存在，Context 放名称清单。没有 skill 正文，也没有 skill 执行器 | 证明运行时留了扩展位置 |
@@ -94,7 +94,7 @@ week,units
 5,105
 ```
 
-用户在页面提交：
+用户通过 CLI 提交：
 
 ```text
 根据 work/notes.txt 和 work/sales.csv，完成 artifacts/report.md。
@@ -119,7 +119,7 @@ Run A 的过程：
 11. Verify 已把 S4 从 completed 改成 blocked。图进入 Replan，发 `replan.started`。S1、S2、S3 保持 completed。S4 从 blocked 改成 pending，标题改为补写结论。新增 S5「对照三个标题后再提交」。发新的 `plan.updated`。这次失败写入 `attempts`，供最后的 Reflect 使用。
 12. Lead 再次运行。这一轮 Context 同时有新 Plan 和 FAIL findings。它 `read_file` 现有报告，`write_file` 补上「结论」，再 `submit_for_verification`。
 13. Verify 看到三个标题都在，且文件非空。PASS。
-14. Reflection 写出一条 fact 和一条 lesson，插入 `project_memory`，发 `memory.written`。Run 发 `run.completed`，payload 里带 `artifacts/report.md`。
+14. Reflection 写出一条 fact 和一条 lesson，写入该 project 的记忆项，发 `memory.written`。Run 发 `run.completed`，payload 里带 `artifacts/report.md`。
 
 Run B，同一 Project，可以是新 Thread：
 
@@ -134,17 +134,18 @@ EnsureContract / EnsurePlan 之后，第一次模型调用的 Context 含 Run A 
 ## 4. 总体架构
 
 ```text
-Browser
-  │  HTTPS / 页面使用的 JSON 与 SSE
+CLI
+  │  JSON 与 SSE
   ▼
 Go
-  │  产品：Project Thread Message Run Event Artifact metadata
+  │  产品：Project Thread Message Run Event
   │  POST /internal/runs → 202 ──────────► Python Agent Runtime
+  │  POST /internal/runs/{id}/resume → 202
   │  ◄──── POST /internal/runs/{id}/events
   ▼
 PostgreSQL
-  ├── Go：projects threads messages runs events artifact_meta
-  └── Python：LangGraph checkpoints，project_memory
+  ├── Go：projects threads messages runs events
+  └── Python：LangGraph PostgresSaver 的 checkpoint 表，PostgresStore 的记忆项
 
 本地磁盘
   workspace/threads/{thread_id}/uploads|work|artifacts
@@ -152,11 +153,11 @@ PostgreSQL
 
 一次用户发送的路径：
 
-1. 前端把目标 POST 给 Go。Go 写入 user message 和 Run（status=`running`），创建工作区目录。
+1. CLI 把目标 POST 给 Go。Go 写入 user message 和 Run（status=`running`），创建工作区目录。
 2. Go 调用 Python `POST /internal/runs`。Python 校验参数后立刻返回 `202 Accepted`，body 为 `{ "run_id", "status": "accepted" }`。这次 HTTP 到此结束。Python 启动成功只表示 Run 已被接受，不表示 Run 完成。
 3. Python 在该请求之外执行图，过程中把事件 POST 回 Go。完成、失败、取消都由这条 Runtime 生命周期负责，不绑在启动请求上。
-4. Go 按 `(run_id, seq)` 插入 `events`，SSE 推给前端。
-5. 前端用事件更新当前页的投影。刷新时先 GET Go 上的 Run、消息和当前 plan/verification 快照，再从 `after_seq` 接 SSE。
+4. Go 按 `(run_id, seq)` 插入 `events`，SSE 推给 CLI。
+5. `run watch` 先 GET 已有事件，再从 `after_seq` 接 SSE。
 
 Python 不对外暴露给浏览器。Go 不调用模型，不改 Plan 内容，不判断报告是否合格。
 
@@ -181,21 +182,21 @@ START
 
 Replan 只有 Verify FAIL 这一条入边。Lead 不能主动请求重规划。
 
-取消在任意模型调用边界生效：Go 把 Run 标成 `cancel_requested`，Python 在下一次循环开头读到后停止，发 `run.cancelled`，不跑 Reflection。Contract 或 Plan 初始化失败直接 `run.failed`，也不跑 Reflection。Lead 已经执行过工具、委派、验证或重规划之后的运行时失败，先 Reflect 只写 lesson，再 `run.failed`。
+取消在任意模型调用边界生效。`cancel_requested` 的持久事实是 Go 的 `runs.status`。Python 进程内标记只负责当前这次执行立刻停下，不是取消状态的唯一来源。进程重启后，Python 仍从该 Run 的状态判断取消已经提出，然后发 `run.cancelled`，不跑 Reflection。Contract 或 Plan 初始化失败直接 `run.failed`，也不跑 Reflection。Lead 已经执行过工具、委派、验证或重规划之后的运行时失败，先 Reflect 只写 lesson，再 `run.failed`。
 
 | 节点 | 输入 | 核心逻辑 | State 修改 | 输出 / 下一节点 |
 | --- | --- | --- | --- | --- |
-| 启动（Go 调用 Python，图尚未进节点） | `project_id`、`thread_id`、`run_id`、`goal`、`workspace_root` | 绑定 thread checkpoint。若是该 Run 的第一次进入，清空本 Run 的 `findings`，`guard` 计数归零，`artifacts` 以磁盘 `artifacts/` 扫描结果为准 | `guard.run_id`、`guard.*` 计数、`findings=[]`、`artifacts` | 事件 `run.started`。下一节点 EnsureContract |
+| 启动（Go 调用 Python，图尚未进节点） | `project_id`、`thread_id`、`run_id`、`goal`、`workspace_root` | 绑定 thread checkpoint，`durability="sync"`。该 Thread 上第一次进入，或上一次图已经结束：清空本 Run 的 `findings` 和 `attempts`，`guard` 计数归零，`artifacts` 以磁盘扫描为准。`resume` 发现图还停在中间节点时，不重新进入本行，直接从 Checkpoint 的下一节点继续 | `guard.run_id`、`guard.*` 计数、`findings=[]`、`artifacts` | 事件 `run.started`。下一节点 EnsureContract。恢复路径不重发本行 |
 | EnsureContract | 用户 goal，以及 `work/notes.txt` 若存在则读取其文本 | 一次结构化模型调用，抽出交付物路径和可机器检查的条目。失败则 `run.failed`，不进入 Lead，不 Reflect | 覆盖 `contract` | 无单独事件。下一节点 EnsurePlan |
 | EnsurePlan | `contract` | 一次结构化模型调用，产出 2 到 6 步。每步有稳定 `id`。不执行工具。失败则 `run.failed`，不 Reflect | 覆盖 `plan`，`plan.version=1` | 事件 `plan.updated`。下一节点 LeadLoop |
 | LeadLoop | 当前 AgentState，外加 Context 临时拼出的模型输入 | 见第 7 章。只在出现 `submit_for_verification` 时离开 | 追加真实的 user/ai/tool 消息；工具成功写盘后更新 `artifacts`；`set_step_status` 只能把步骤改成 `in_progress` 或 `completed` | 工具与步骤事件。submit 则下一节点 Verify；否则留在 LeadLoop |
 | Subagent（由 `delegate_task` 在 LeadLoop 内同步调用） | 父级传入的 task 文本、workspace 根、只读的 contract 摘要 | 独立消息、独立模型循环，只用文件工具。见第 12 章 | 父状态只增加一条 ToolMessage，以及 `delegations` 的短记录。子消息不写入父 checkpoint | `subagent.started` / `subagent.completed`。回到 LeadLoop |
 | Verify | `contract`、磁盘文件、本 Run 工具结果摘要、必要时最近消息 | 先查文件，再查工具结果，再查消息，最后才允许模型做语义判断。见第 11 章。FAIL 时把对应该交付物的 `completed` 步骤改成 `blocked` | 覆盖 `findings`。追加一条 `attempts` 验证记录。通过时不改步骤状态 | 事件 `verification.completed`。PASS → Reflect；FAIL → Replan |
 | Replan | 当前 `plan`、`findings`、`contract`、`attempts` | 结构化模型调用产出新 plan 和 diff。completed 步骤的 id 与 title 必须保留。见第 10 章 | 覆盖 `plan`，`version+1`，写入 `plan.diff`。追加一条 `attempts` 重规划记录 | 事件 `replan.started`（reason 只有 `verification_failed`），随后 `plan.updated`。`guard.replan_count+1`。下一节点 LeadLoop。超过上限则先 Reflect lesson 再 `run.failed` |
-| Reflect | 终态 State、`attempts`、交付路径。不只有最终 findings | 一次结构化模型调用，最多 3 条 `fact`、2 条 `lesson`。PASS 可以写 fact 和 lesson。已执行后的运行时失败只写 lesson。初始化失败和取消不进入本节点 | 不改 Checkpoint 里的业务字段。插入 PostgreSQL `project_memory` | 每条记忆发 `memory.written`。下一节点结束或 `run.failed` |
+| Reflect | 终态 State、`attempts`、交付路径。不只有最终 findings | 一次结构化模型调用，最多 3 条 `fact`、2 条 `lesson`。PASS 可以写 fact 和 lesson。已执行后的运行时失败只写 lesson。初始化失败和取消不进入本节点 | 不改 Checkpoint 里的业务字段。写入 `PostgresStore` | 每条记忆发 `memory.written`。下一节点结束或 `run.failed` |
 | 结束 | Reflect 的写入结果，或失败/取消原因 | 图在后台任务里结束，并发出终态事件。Go 根据事件把 Run status 写成终态。启动那次 HTTP 早已返回 | Checkpoint 停在终态，供同一 thread 的下一次 Run 接着读消息和 summary | `run.completed` 或 `run.failed` 或 `run.cancelled` |
 
-启动请求不等图。Go 创建 Run 后向 Python 要一个 202，然后靠 Event 观察。没有任务队列。Python 进程崩溃时，Go 上的 Run 停留在 `running`，直到取消请求或超时把它收成 `failed`。超时只是展示用的安全网，默认 30 分钟，不是调度框架。
+启动请求不等图。Go 创建 Run 后向 Python 要一个 202，然后靠 Event 观察。没有任务队列。Python 进程崩溃时，Go 上的 Run 停留在 `running`，Checkpoint 停在最后一个已提交的节点。`resume` 用同一个 `thread_id` 从那里继续，不另写节点调度器。取消请求把 status 写成 `cancel_requested`，恢复时先看这个状态。超时只是展示用的安全网，默认 30 分钟，不是调度框架。
 
 ---
 
@@ -214,7 +215,7 @@ messages_for_llm = 当前这一次模型调用的输入
 | --- | --- | --- | --- | --- | --- | --- |
 | `messages` | 用户消息、模型消息、工具结果。不含 Context 拼装块 | LeadLoop、Subagent 的结果回收、Run 开始时追加的那条用户 goal | Context 取最近窗口；Summarization 删除旧段；Reflect 只读不改 | 随 Thread 保留 | 是 | LangGraph `add_messages`。摘要时用删除旧消息的更新，不是另附一份上下文 |
 | `contract` | 本 Run 的目标、交付物、可检查条目 | EnsureContract 覆盖写。Run 开始时重置 | EnsurePlan、Context、Verify、Replan、Reflect | 本 Run。下一 Run 覆盖 | 是 | 整块替换 |
-| `plan` | 步骤列表、version、最近一次 diff | EnsurePlan 创建；Lead 的 `set_step_status` 只改 status/note；Replan 整块替换并写 diff | Context、Lead、前端经由 `plan.updated` | 本 Run。下一 Run 由 EnsurePlan 覆盖 | 是 | 步骤状态是原地改；Replan 是整份替换 |
+| `plan` | 步骤列表、version、最近一次 diff | EnsurePlan 创建；Lead 的 `set_step_status` 只改 status/note；Replan 整块替换并写 diff | Context、Lead、CLI 经由 `plan.updated` | 本 Run。下一 Run 由 EnsurePlan 覆盖 | 是 | 步骤状态是原地改；Replan 是整份替换 |
 | `summary` | 已被移出 `messages` 的旧对话压缩文本 | SummarizationMiddleware | Context | 随 Thread 累积，每次压缩覆盖为「旧 summary + 新被裁掉的那段」 | 是 | 替换字符串 |
 | `findings` | 最近一次 Verify 的条目列表 | Verify 覆盖。Run 开始清空 | Context、Replan | 本 Run | 是 | 整块替换 |
 | `artifacts` | 相对工作区的路径列表，例如 `artifacts/report.md` | Run 开始时扫描 `artifacts/`；`write_file` 成功后把路径并入 | Verify 用它做候选，但仍以磁盘为准；Context 只给路径 | 随 Thread。磁盘文件还在，列表就还在 | 是 | 并集去重 |
@@ -263,9 +264,9 @@ items:
 
 ## 7. Lead Agent Loop
 
-不使用 `create_agent` 作为 Run 的完成闸门。
+不使用 `create_agent` 作为 Run 的完成闸门，也不改用 `ToolNode`。
 
-DeerFlow 使用它，是因为那个产品接受「模型不再调工具即本轮代理结束」。Cakerdesk 的展示点是运行时不相信这句话。若把 `create_agent` 套在外面，它会在普通文本处返回，外层还要再把同一个代理叫起来，退出条件仍然藏在库里面。LeadLoop 改成显式的两个节点，工具调用方式与 `create_agent` 相同：模型绑定工具，AIMessage 上的 `tool_calls` 交给 ToolNode 执行，ToolMessage 追加进 `messages`。
+DeerFlow 使用 `create_agent`，是因为那个产品接受「模型不再调工具即本轮代理结束」。Cakerdesk 的展示点是运行时不相信这句话。若把 `create_agent` 套在外面，它会在普通文本处返回，外层还要再把同一个代理叫起来，退出条件仍然藏在库里面。LeadLoop 仍是显式的两个节点。真实模型是 `ChatOpenAI`：Lead 用代码里的 `@tool` 做 `bind_tools`，Contract、Plan、Replan、Reflect 用 Pydantic schema 做 `with_structured_output`。测试替身返回已经符合这些形状的对象或 Tool Call，不另做一套模型适配。AIMessage 上的 `tool_calls` 由现有 tool 节点执行，ToolMessage 追加进 `messages`。
 
 ```text
 Model
@@ -282,7 +283,7 @@ Model
       → 不进入 Verify
 ```
 
-普通文本不代表完成，因为模型经常会在证据还没落盘时生成一句总结。演示里第 8 步就是这个情况：用户已经在页面上看到「报告写好了」，右侧 Run 状态仍是 running，直到 submit 之后才出现 Verification。
+普通文本不代表完成，因为模型经常会在证据还没落盘时生成一句总结。演示里第 8 步就是这个情况：CLI 已经打出「报告写好了」，Run 状态仍是 running，直到 submit 之后才出现 Verification。
 
 `submit_for_verification` 的参数只有一个短 `summary`，给事件和 Reflect 用，不作为通过依据。工具实现不写文件、不改 plan。图的条件边看到这个 tool name 就离开循环。它不会先被执行成一条普通观察再碰运气。若同一次响应里既有 `write_file` 又有 submit，先执行写文件，再离开。若同一次里还有别的未执行工具，也先执行那些工具，最后才离开。submit 本身不产生 ToolMessage 以外的业务状态；可以记一条内容为 `submitted` 的 ToolMessage，便于消息历史读得通，但这条消息不是通过证明。
 
@@ -348,7 +349,7 @@ Subagent 返回之后不需要一种新的上下文类型。结果已经是父 `
 ### 边界
 
 ```text
-AgentState + project_memory 查询结果
+AgentState + 该 project 的记忆项
         ↓
 ContextManager.build
         ↓
@@ -435,7 +436,7 @@ Run 到达终态
  ↓
 Reflect 决定有没有值得留下的 fact / lesson
  ↓
-PostgreSQL project_memory
+PostgresStore 中该 project 的记忆项
  ↓
 以后任意同 Project 的 Run
  ↓
@@ -446,7 +447,7 @@ ContextManager 的 Memory 层
 该 Run 的模型输入
 ```
 
-Memory 是跨 Run 的项目经验。Context 是这一次调用的工作记忆。Thread 上的对话继续留在 Checkpoint 的 `messages` 和 `summary` 里，不复制进 `project_memory`。
+Memory 是跨 Run 的项目经验。Context 是这一次调用的工作记忆。Thread 上的对话继续留在 Checkpoint 的 `messages` 和 `summary` 里，不复制进记忆项。
 
 ### 写什么
 
@@ -474,18 +475,16 @@ lesson 必须来自 `attempts` 和消息里的真实过程。演示文案不能�
 
 ### 存在哪里、怎么读
 
-表 `project_memory`：
+记忆放在 LangGraph `PostgresStore`，不另建 `project_memory` 表，也不做向量索引。命名空间是 `("project", project_id, "memory")`。每一项的值是：
 
 ```text
-id
-project_id
 kind          fact | lesson
 content       纯文本，单条最多 500 字
 source_run_id
 created_at
 ```
 
-`read_for_context(project_id)` 取 `created_at` 最新的 20 条。没有关键词检索，没有向量，没有跨项目。Context 再按第 8 章的 800 token 从最旧开始丢。
+`read_for_context(project_id)` 取 `created_at` 最新的 20 条，再按时间从旧到新交给 Context。没有关键词检索，没有向量，没有跨项目。Context 再按第 8 章的 800 token 从最旧开始丢。表由 Store 的 `setup()` 创建，不写进 Go 的 migration。
 
 ### 跨 Run 时序
 
@@ -504,7 +503,7 @@ Run B（同一 project_id，新的 thread 也可以）
   Checkpoint 的 messages 里仍然没有这段投影
 ```
 
-验收时打印或断言的是模型请求，不是页面上的某一句话。页面只看到一条短的 `memory.written`，看不到记忆全文。
+验收时打印或断言的是模型请求，不是 CLI 上的某一句话。CLI 只看到一条短的 `memory.written`，看不到记忆全文。`memory list` 是事后查看，不参与决策。
 
 ---
 
@@ -643,7 +642,7 @@ Lead 的下一次模型调用
 
 父级传给子级的只有：`subagent_id`、task 字符串、workspace 根、contract 的 goal 与交付路径（让它知道不要改错文件）。不传父级的完整 messages、不传 Project Memory、不传 findings、不传父 plan 全文。task 字符串里由 Lead 写清要看的文件和要返回的格式。
 
-子级不进入的东西，也是它不能做的事：不写 `project_memory`，不跑 Verify，不持有 plan，不能调用 `delegate_task`、`submit_for_verification`、`set_step_status`。工具只有 `list_dir`、`read_file`、`write_file`。演示里的异常点任务只需要读 csv，不要求它写报告。报告仍由 Lead 写，这样 Artifact 的责任在父级，Verify 也只检查父级交付物。
+子级不进入的东西，也是它不能做的事：不写项目记忆，不跑 Verify，不持有 plan，不能调用 `delegate_task`、`submit_for_verification`、`set_step_status`。工具只有 `list_dir`、`read_file`、`write_file`。演示里的异常点任务只需要读 csv，不要求它写报告。报告仍由 Lead 写，这样 Artifact 的责任在父级，Verify 也只检查父级交付物。
 
 子图使用内存 checkpointer，key 是 `subagent_id`。工具返回后这份状态丢掉。父 thread 的 PostgreSQL Checkpoint 不包含子消息。父状态只增加：
 
@@ -686,9 +685,9 @@ Lead write_file("artifacts/report.md", 正文)
     写完后 stat 成功
     state.artifacts 并入 "artifacts/report.md"
  ↓
-Go 不在写文件的瞬间抄一份正文。
+Go 不在写文件的瞬间抄一份正文，也不建 artifact 元数据表。
 Python 在 run.completed 的 payload 里带相对路径。
-Go 把该路径写入 artifact_meta（run_id、path、size、mtime），供页面列出。
+Go 把路径抄进该 Run 的 `artifact_paths`，供 CLI 列出。文件是否存在仍以磁盘为准。
  ↓
 Verify 再次打开 workspace_root/artifacts/report.md
     不以 state.artifacts 里有这条字符串作为文件存在的证据
@@ -705,7 +704,7 @@ Verify 再次打开 workspace_root/artifacts/report.md
 | Middleware | 钩子 | 输入 | 输出 | 为什么是 Middleware | 为什么不是业务 |
 | --- | --- | --- | --- | --- | --- |
 | ContextMiddleware | `wrap_model_call` | 当前 State，以及这次读到的 memory 行 | 替换后的 ModelRequest。不改 State | 每次模型调用都要重建输入，挂在调用边上才不会漏 | 它不决定 Plan 长什么样，只是把已经写好的 State 摊开 |
-| SummarizationMiddleware | 普通模型调用前，若 `messages` 估算超过 6000 token 或条数超过 24 | 除最近 8 条以外的旧消息，加上已有 summary | 用新 summary 替换 `state.summary`。从 `messages` 删除被摘要的那些消息 | 这是历史体积的横切限制，Lead 不该在业务工具里记得压缩 | 摘要不是 lesson，也不写入 `project_memory` |
+| SummarizationMiddleware | 普通模型调用前，若 `messages` 估算超过 6000 token 或条数超过 24 | 除最近 8 条以外的旧消息，加上已有 summary | 用新 summary 替换 `state.summary`。从 `messages` 删除被摘要的那些消息 | 这是历史体积的横切限制，Lead 不该在业务工具里记得压缩 | 摘要不是 lesson，也不写入项目记忆 |
 | TokenBudgetMiddleware | 普通模型响应之后 | 响应里的 usage | `guard.total_tokens` 累加。达到 200000 则让图走向失败 | 防止展品跑飞账单和死循环 | 它不看任务有没有做完，只看消耗 |
 
 普通 Agent 模型调用的顺序是 ContextMiddleware → SummarizationMiddleware → TokenBudgetMiddleware → Model。
@@ -723,7 +722,9 @@ Skill 痕迹：进程启动时扫描 `python/skills/*/SKILL.md` 的标题。Cont
 ```text
 Python 节点或工具边界
  ↓
-POST /internal/runs/{run_id}/events
+LangGraph custom stream
+ ↓
+EventSink 为该 run_id 分配 seq，POST /internal/runs/{run_id}/events
  ↓
 Go 校验 run 存在，按 (run_id, seq) 插入
  ↓
@@ -731,7 +732,7 @@ PostgreSQL events
  ↓
 GET /api/runs/{run_id}/events    text/event-stream
  ↓
-前端 RunViewState
+CLI run watch
 ```
 
 事件是某次状态变化的记录，不是另一份 AgentState。先改 State 或先落盘，再发事件。发送失败只打 warning，同一 body 重试。Agent 不因为页面没收到事件而重做工具。
@@ -746,7 +747,7 @@ GET /api/runs/{run_id}/events    text/event-stream
 }
 ```
 
-`seq` 由 Python 在该 Run 内从 1 递增。对象一旦生成，重试不换号。Go 不重新编号。唯一约束 `(run_id, seq)` 让重复 POST 变成成功的空操作。序号允许空洞，前端按 seq 排序。
+`seq` 由 Python 在该 Run 内从 1 递增，不跨 Run 共用计数。对象一旦生成，重试不换号。Go 不重新编号。唯一约束 `(run_id, seq)` 让重复 POST 变成成功的空操作。序号允许空洞，CLI 按 seq 排序。
 
 SSE 每条：
 
@@ -783,13 +784,13 @@ data: {"run_id":"...","seq":17,"type":"verification.completed","timestamp":"..."
 | 数据 | 真相在哪 | 另一侧看到什么 |
 | --- | --- | --- |
 | Project、Thread、用户 Message、Run 状态 | Go 的表 | Python 只在启动参数里拿到 id 和 goal |
-| Event | Go 的 `events` 表。内容由 Python 产生，Go 不改 payload | 前端只经过 SSE 和刷新时的 GET |
-| Workspace 目录与文件字节 | 磁盘。Python 工具读写 | Go 保存 metadata：相对路径、大小、mtime。Go 不解释报告内容 |
-| AgentState（messages、contract、plan、summary、findings、artifacts 列表、delegations、guard） | Python Checkpoint | Go 不读 Checkpoint。页面上的 Plan / Verification 来自事件投影和 Go 为刷新保存的最新快照 |
-| Project Memory 全文 | Python 的 `project_memory` 表 | 前端只有 `memory.written` 的短 summary。Go 不查询这张表来做决策 |
+| Event | Go 的 `events` 表。内容由 Python 产生，Go 不改 payload | CLI 只经过 SSE 和已有事件的 GET |
+| Workspace 目录与文件字节 | 磁盘。Python 工具读写 | Go 的 Run 只保存相对路径快照。Go 不解释报告内容，不建 artifact 元数据表 |
+| AgentState（messages、contract、plan、summary、findings、artifacts 列表、delegations、guard） | Python Checkpoint（`PostgresSaver`） | Go 不读 Checkpoint。CLI 上的 Plan / Verification 来自事件投影和 Go 为刷新保存的最新快照 |
+| Project Memory 全文 | Python 的 `PostgresStore` | CLI 的活动流只有 `memory.written` 的短 summary。Go 不读取记忆来做决策 |
 | 模型选择与工具执行 | Python | Go 不知道这次有没有调用模型 |
 
-刷新页面时，Go 需要能给出「当前 Run 已投影的计划、最近一次验证、消息、产物列表」，否则只有 SSE 的话，刷新会丢掉已经播过的画面。做法是 Go 在插入 `plan.updated`、`verification.completed`、`run.completed` 时，把 payload 抄进 `runs` 行上的 `plan_snapshot`、`verification_snapshot`、`artifact_paths`。这是事件的物化，不是第二套规划器。Python Checkpoint 仍是 Agent 继续执行时的真相。若两边短暂不一致，以 Checkpoint 里下一步要读的 State 为准；页面以 Go 快照为准，直到下一条事件到来。
+`run show` 需要能给出「当前 Run 已投影的计划、最近一次验证、消息、产物路径」，否则只有 SSE 的话，重新打开会丢掉已经播过的过程。做法是 Go 在插入 `plan.updated`、`verification.completed`、`run.completed` 时，把 payload 抄进 `runs` 行上的 `plan_snapshot`、`verification_snapshot`、`artifact_paths`。这是事件的物化，不是第二套规划器。Python Checkpoint 仍是 Agent 继续执行时的真相。若两边短暂不一致，以 Checkpoint 里下一步要读的 State 为准；CLI 以 Go 快照为准，直到下一条事件到来。
 
 Go 调用 Python。Python 立刻返回 202，图在请求外执行：
 
@@ -813,64 +814,71 @@ Python 调用 Go：
 POST /internal/runs/{run_id}/events
 ```
 
-取消：
+取消先改 Go 的 `runs.status`，再通知正在跑的 Python：
 
 ```http
 POST /internal/runs/{run_id}/cancel
 ```
 
-内部事件接口只监听 Go 能访问的地址，不交给浏览器。
+恢复用同一个 thread 上尚未结束的 Checkpoint：
+
+```http
+POST /internal/runs/{run_id}/resume
+```
+
+Python 在启动和恢复时读取该 Run 的 status。内部事件接口只监听 Go 能访问的地址，不交给浏览器。
 
 ---
 
-## 17. Frontend / UI Projection
+## 17. CLI Projection
 
-三栏：
+展示层只有 CLI。它不持有 AgentState。
 
 ```text
-左：Project 列表，其下 Thread
-中：该 Thread 的消息。来源是 Go 的 messages，加上 SSE 的 model.message 和工具短结果
-右：Run Activity
+cakerdesk project ...
+cakerdesk thread ...
+cakerdesk run start|show|watch|resume|cancel
+cakerdesk artifact list
+cakerdesk memory list
 ```
 
-右侧只放：
+`run show` 打印：
 
-- Run 状态：running / completed / failed / cancelled
+- Run 状态：running / cancel_requested / completed / failed / cancelled
 - Plan 步骤和 status
 - 最近一次 Verification 的 passed 和 findings
-- Replan：出现 `replan.started` 时显示原因，并等下一条 `plan.updated` 换计划
-- Subagent：started 到 completed 的任务名和短 summary
-- Artifacts：`run.completed` 或 Go 的 artifact_meta 路径
-- 一条按 seq 排列的活动时间线，用上述事件生成
+- Artifacts：Run 上的路径快照。`artifact list` 再对磁盘做存在性核对
+
+`run watch` 先按 seq 打出已有事件，再接 SSE。时间线只来自事件：
+
+- `replan.started` 打出原因，下一条 `plan.updated` 换计划
+- Subagent 的 started / completed 打出任务名和短 summary
+- `model.message` 和 `tool.completed` 打出短文本
 
 ```text
 Event
  ↓
 Go events 表与 runs 上的快照
  ↓
-前端 RunViewState
- ↓
-三栏
+CLI 输出
 ```
 
-`RunViewState` 只有展示字段：`status`、`messages`、`plan`、`verification`、`subagents`、`artifacts`、`timeline`。没有 Context、没有 Memory 全文、没有 Checkpoint。
+CLI 不请求 Python 做决策，不调用模型，不改计划，不判定通过，不写记忆。`memory list` 只读已经写好的项目记忆。
 
-前端不请求 Python，不调用模型，不改计划，不判定通过，不写记忆。
+演示主线在输出里的变化：
 
-演示主线在页面上的变化：
-
-1. 用户发送后，中间出现自己的消息。右侧状态变成 running。时间线出现 run.started。
-2. `plan.updated` 后右侧出现 S1–S4，全是 pending。
-3. 每次 `tool.completed`，中间追加一行短结果，时间线追加一条。S1、S2 随后变成 completed。
-4. `subagent.started` 时右侧出现「分析异常点」进行中。`subagent.completed` 后变成完成，并带一句摘要。S3 completed。
-5. 模型若说出「报告写好了」，中间能看到这句话，右侧状态仍是 running。这时还没有 Verification 面板。
-6. `verification.completed` 且 passed 为 false。右侧 Verification 显示「结论」失败，evidence 为文件里没有该标题。
-7. `replan.started` 显示 verification_failed。紧接着的 `plan.updated` 把 S4 显示为 pending（补写），并出现 S5。S1–S3 仍是 completed。
+1. `run start` 之后，状态是 running，时间线出现 run.started。
+2. `plan.updated` 打出 S1–S4，全是 pending。
+3. 每次 `tool.completed` 追加一行短结果。S1、S2 随后变成 completed。
+4. `subagent.started` 打出「分析异常点」进行中。`subagent.completed` 后变成完成，并带一句摘要。S3 completed。
+5. 模型若说出「报告写好了」，这句能看到，状态仍是 running。这时还没有 Verification。
+6. `verification.completed` 且 passed 为 false。「结论」失败，evidence 为文件里没有该标题。
+7. `replan.started` 打出 verification_failed。紧接着的 `plan.updated` 把 S4 显示为 pending（补写），并出现 S5。S1–S3 仍是 completed。
 8. 再次出现写文件的工具事件，然后第二次 `verification.completed` 为通过。
 9. 时间线出现 memory.written，只显示 lesson 的短摘要。
-10. 状态变为 completed，Artifacts 列出 `artifacts/report.md`。
+10. 状态变为 completed，产物路径列出 `artifacts/report.md`。
 
-刷新发生在第 7 步之后时：GET Run 拿到 Go 上的 plan 快照和 failed verification，消息列表含已有 tool 短结果，SSE 从最后 seq 继续。不重新推断「既然失败了就该重规划」。
+在第 7 步之后重新 `run watch`：先拿到 Go 上的 plan 快照和 failed verification，再从最后 seq 继续。不重新推断「既然失败了就该重规划」。
 
 不展示：每一层 context 的 token、middleware 顺序、AgentState JSON、Checkpoint 行。
 
@@ -906,7 +914,7 @@ Replan
 
 Lead 下一次模型调用
   ContextManager 读 Checkpoint 的 plan v2 和 findings
-  另读 project_memory（此时还没有本 Run 的新行）
+  另读该 project 的记忆项（此时还没有本 Run 的新项）
   只在请求里拼出第 8 章的第二段
   Checkpoint.messages 不增加这段 System
 ```
@@ -915,7 +923,7 @@ Lead 下一次模型调用
 
 ```text
 Verify 写 findings.passed = true
-Reflect 只往 project_memory 插入行
+Reflect 只往 PostgresStore 写入记忆项
 Checkpoint 不保存记忆副本
 memory.written 只带短 summary
 下一次 Run 的 ContextManager 用 project_id 再读这些行
@@ -959,6 +967,8 @@ memory.written 只带短 summary
 - 依赖图、多层规划、Planner 代理、任务调度器
 - 多种 Verifier、评分器和独立验证产品
 - 高可用、多副本抢主、RBAC、多租户
+- 自动 supervisor、lease、heartbeat、Worker 队列
+- 把每个工具包成 exactly-once 副作用框架
 
 DeerFlow 里还有标题生成、澄清问题、看图、后台任务、引用收据、自定义 Agent 配置。它们对完整产品有用，但不出现在第 3 章的主线上，因此不做。
 
@@ -978,40 +988,45 @@ Replan 是节点，是因为它要整份替换 Plan 并接受代码对 completed
 
 Subagent 结果回到 ToolMessage，是为了让父循环的下一次模型调用用同一条「工具观察」规则消化它。子消息若并进父 Checkpoint，父级的摘要、预算和页面消息都会被局部分析淹没，隔离也就不存在。
 
-Event 是观察层，是因为页面和 Go 需要过程，但下一步该不该 Replan 已经由 Python 的边决定。前端根据 `plan.updated` 改自己的计划，就会在断线重连时和 Checkpoint 各讲各的。
+Event 是观察层，是因为 CLI 和 Go 需要过程，但下一步该不该 Replan 已经由 Python 的边决定。CLI 根据 `plan.updated` 改自己的计划，就会在断线重连时和 Checkpoint 各讲各的。
 
 Go 不参与决策，是因为契约、计划、验证和记忆的一致性都在同一条图里。若 Go 也保存一份可写的 Plan 并允许编辑，Python 下一轮就不知道该信谁。Go 只物化事件快照，供刷新使用。
 
-前端只做投影，是因为展示主线要让人看见运行时的决定，而不是在浏览器里再实现一个运行时。
+CLI 只做投影，是因为展示主线要让人看见运行时的决定，而不是在命令里再实现一个运行时。
 
 ---
 
 ## 22. Implementation Mapping
 
-下面是终态地图，用来对照模块该落在哪。某一阶段用不到的文件不要提前创建，也不要为了「以后好扩展」先放空接口。现在不写这些文件。
+下面是终态地图，用来对照模块该落在哪。不为「以后好扩展」先放空接口。
 
 ```text
 cakerdesk-next/
 ├── docs/agent-runtime-design.md
 ├── python/
 │   ├── cakerdesk/
-│   │   ├── main.py                 # POST /internal/runs 立即 202；POST /internal/runs/{id}/cancel
-│   │   ├── graph.py                # 组装第 5 章的图
+│   │   ├── main.py                 # POST /internal/runs 立即 202；cancel；resume
+│   │   ├── model.py                # 只构造 ChatOpenAI，并暴露 bind_tools / with_structured_output
+│   │   ├── graph.py                # 组装第 5 章的图。PostgresSaver，durability=sync
 │   │   ├── state.py                # AgentState
 │   │   ├── lead.py                 # LeadLoop 的 model 节点与路由
-│   │   ├── tools.py                # 文件工具、set_step_status、submit、delegate_task
+│   │   ├── tools.py                # @tool：文件工具、set_step_status、submit、delegate_task
+│   │   ├── schemas.py              # Contract、Plan、Reflection
+│   │   ├── prompts/                # 各次调用的固定说明
 │   │   ├── context.py              # ContextManager
 │   │   ├── middleware.py           # 三个 middleware
-│   │   ├── memory.py               # Reflect、读写 project_memory
-│   │   ├── plan.py                 # EnsurePlan、Replan、PlanDiff 校验
+│   │   ├── memory.py               # PostgresStore 的读写
+│   │   ├── plan.py                 # 规范化与 PlanDiff 校验。不截取 JSON
 │   │   ├── verify.py               # Verifier
 │   │   ├── subagent.py             # SubagentExecutor
 │   │   ├── workspace.py            # 路径约束与扫描
-│   │   └── events.py               # seq 与 POST Go
+│   │   └── events.py               # 按 Run 分配 seq，并 POST Go
 │   └── skills/                     # 可空。只留 SKILL.md 痕迹
-├── go/
-│   └── internal/...                # Project Thread Message Run、事件 ingest、SSE、artifact_meta
-└── web/                            # 三栏与 RunViewState
+└── go/
+    ├── cmd/cakerdesk/              # serve 与 CLI
+    ├── internal/server/            # Gin handler，直接调用 sqlc
+    ├── internal/db/                # sqlc 生成代码
+    └── migrations/                 # projects threads messages runs events
 ```
 
 ```text
@@ -1021,8 +1036,7 @@ ContextManager
   不写 State
 
 MemoryStore
-  reflect(run_view) -> list[{kind, content}]     # 一次模型调用
-  write(project_id, run_id, items) -> None        # INSERT
+  write(project_id, run_id, items) -> rows        # PostgresStore.put
   read_for_context(project_id) -> rows            # 最近 20 条
 
 Planner
@@ -1045,7 +1059,7 @@ LeadRouter
   route(ai_message) -> tools | verify | continue
 ```
 
-Go 侧对应：`CreateRun`、`IngestEvent`（幂等插入）、`StreamEvents(after_seq)`、`CancelRun`。前端对应：`applyEvent(state, event) -> RunViewState`。
+Go 侧对应：`CreateRun`、`ResumeRun`、`IngestEvent`（幂等插入）、`StreamEvents(after_seq)`、`CancelRun`。取消先写 `runs.status=cancel_requested`。CLI 对应这些读接口，不在本地重放决策。
 
 ---
 
@@ -1057,35 +1071,30 @@ Go 侧对应：`CreateRun`、`IngestEvent`（幂等插入）、`StreamEvents(aft
 - 只返回普通 assistant 文本时，图仍停在 LeadLoop，不产生 `verification.completed`。
 - 第一次 Lead 请求的上下文含 Plan v1。FAIL 和 Replan 之后的下一次 Lead 请求含 Plan v2 和 failed findings。两次请求的拼装 System 都不在 Checkpoint 的 `messages` 里。
 - 把消息灌过摘要阈值后，Checkpoint 的 `summary` 改变，被覆盖的旧消息从 `messages` 消失，最近消息还在。
-- Run A PASS 后，`project_memory` 有行。同一 project 的 Run B 第一次模型请求包含该内容。
+- Run A PASS 后，该 project 的记忆项里有 lesson。同一 project 的 Run B 第一次模型请求包含该内容。
 - 契约要求 `artifacts/report.md` 且必须包含「结论」。磁盘上的文件没有这一标题时，Verify 为 FAIL，并进入 Replan。
 - Replan 后的 plan 保留 S1–S3 的 id 与 title，S4 被修改，并出现新步骤。随后的 Lead 请求读到的是这份 plan。
 - `delegate_task` 期间子级自己的模型消息不出现在父 Checkpoint。父 `messages` 里能找到那条结果 ToolMessage。
 - `write_file` 之后磁盘上有非空文件。Verify 的 evidence 来自这次读取，而不是只看 `state.artifacts`。
 - `run.started`、`tool.started`、`tool.completed`、`verification.completed`、`run.completed` 或 `run.failed` 出现在 Go 的 `events` 表，且 `(run_id, seq)` 唯一。SSE 用 `after_seq` 能只收到之后的事件。
-- 页面右侧能依次看到计划、失败的验证、新计划、产物路径和完成状态。中间能看到模型文本和工具短结果。
+- `run watch` 能依次看到计划、失败的验证、新计划、产物路径和完成状态，也能看到模型文本和工具短结果。中断后 `resume` 不重置已有 Plan、Findings 和已写文件。重启后仍能从 `runs.status` 看出取消已经提出。
 
 ---
 
 ## 24. Implementation Phases
 
-施工顺序以本章为准。第 23 章是终态行为，不是第一周就要同时满足的清单。
-
-第 4 章把「FAIL 之后看见 Plan v2」写成 Context 的证明。第 6 章把完整 Replan 放在更后面。拆开做，避免第二阶段顺手把规划器做完：
-
-1. 阶段 2 只用阶段 1 已经写出的真实 findings，证明第二次模型请求和第一次不同，且拼装结果不在 Checkpoint 里。
-2. 阶段 4 再改 Plan。那时把断言升级成：请求里同时有 Plan v2 和 findings，并且 Lead 真的去改文件。
+施工顺序以本章为准。第 23 章是终态行为。每一阶段先通过自己的验收，再进入下一阶段。模型调用边界和 Go 产品库都不是项目终点。
 
 | 施工阶段 | 只做这些 | 纵向验收 | 此阶段明确不做 |
 | --- | --- | --- | --- |
-| 1. Lead 纵切 | 真实模型、`read_file`、ToolMessage、下一次调用看见观察、`write_file`、`submit_for_verification`、按磁盘做存在性和 `must_contain` 的 Verify | `read → observe → reason → write → submit`。普通文本不进入 Verify | Memory、Subagent、前端、完整 middleware 套件、Go 事件链。Event 用测试 EventSink。Go 若需要启动，只留最小壳 |
-| 2. Context | `State → ContextManager → messages_for_llm → LLM`。预算裁剪和 Summarization 只在这条链上需要时才加 | 第一次请求是 Plan v1、没有 findings。同一次运行里 Verify 写出失败 findings 之后，下一次请求变了。`Checkpoint.messages` 不等于 `messages_for_llm` | 固定 prompt 字符串。Replan 节点。记忆检索 |
-| 3. Memory | Run A Reflect → `project_memory` → Run B 的 ContextManager → 模型请求出现 Run A 的 lesson | 跨 Run 能在请求正文里看到那条 lesson | 向量、embedding、排序、检索框架、置信度、CRUD API、自动清理 |
-| 4. Verify → Replan | 缺「结论」则 FAIL；Replan 改计划；Lead 读到新 Plan 和 findings；`write_file` 补上；再 Verify PASS | 失败改变了后续工具行为，而不是只返回一个新 Plan 对象 | 更聪明的规划算法、依赖图、独立 Planner |
-| 5. Subagent | 一个通用 executor：delegate、独立模型调用、结果 ToolMessage、Lead 继续 | 子消息不在父 Checkpoint | 多角色、registry、factory、递归、子代理自己的 memory / verify / plan |
-| 6. 包装 | Python 事件 POST 到 Go，落库，SSE，三栏页面 | 面试官能看到计划、失败、重规划、产物和完成 | 生产级重试、HA、权限、分布式一致性 |
-
-阶段 1 的事件留在测试 EventSink。阶段 6 必须换成真实的 `POST /internal/runs/{run_id}/events`。日志不算事件完成。
+| 1. 模型调用边界 | Prompt 文件、Pydantic、`@tool`。真实模型用 `ChatOpenAI` 的 `bind_tools` 与 `with_structured_output`。测试替身返回同形状的结果，不重做 LangChain 适配 | 周报行为测试仍通过。不再从文本截 JSON，工具 schema 不再是空对象 | 更换 Checkpoint、更换 Go、删除 CLI 之外的展示 |
+| 2. 真实主链 | Contract、Plan、Replan、Reflect、Lead、Subagent 分别走结构化输出或绑工具的调用。Verify 仍只查磁盘 | 缺「结论」仍 FAIL，补写后 PASS。普通文本不进入 Verify | `create_agent`、`ToolNode`、Provider 工厂 |
+| 3. Checkpoint | `PostgresSaver`，`durability="sync"`，`thread_id` 为产品 thread。表由 `setup()` 创建 | 中断后同一 thread 的状态仍有 Plan、Findings、Messages | 自建 checkpoint 表，或把它们写进 Go migration |
+| 4. Resume | 图已经结束或尚未开始时才初始化本 Run 字段。`resume` 从已有 Checkpoint 的下一节点继续 | 崩溃后恢复不重置计划、发现和已写文件 | 自写节点调度器，把每个工具包成 `task` |
+| 5. Memory 与事件 | `PostgresStore`。节点把事件写入 custom stream，EventSink 按 Run 从 1 编号后 POST Go | Run B 的模型输入看见 Run A 的 lesson。两个 Run 的 seq 各自从 1 开始 | 向量、自建记忆表、Go 重编号 |
+| 6. Go 产品面 | Gin、sqlc、goose、`pgxpool`。创建 Run 只等 202。没有 `artifact_meta` | 产品状态在 PostgreSQL。没有库的测试跳过，不退回 SQLite | Service 层、Redis、队列 |
+| 7. CLI | `project`、`thread`、`run start\|show\|watch\|resume\|cancel`、`artifact list`、`memory list`。`watch` 先历史再实时 | 取消写入 `runs.status`。进程重启后仍能看出该 Run 已被请求取消 | supervisor、lease、heartbeat |
+| 8. 收口 | 删除静态页面和 Go 的静态文件服务。用周报主线加上一次中断恢复收口 | 第 3 章主线能用 CLI 看完 | 此后的平台能力 |
 
 ---
 
@@ -1097,7 +1106,7 @@ Go 侧对应：`CreateRun`、`IngestEvent`（幂等插入）、`StreamEvents(aft
 S  核心行为真实
 A  核心模块互相连通
 B  一条完整 Demo 主线跑通
-C  前端能把过程展示清楚
+C  CLI 能把过程展示清楚
 D  工程边界和异常处理
 E  生产级完整性
 ```
@@ -1110,7 +1119,7 @@ S/A/B/C 没有完成之前，不把时间花在 D/E。
 - Verification → Replan 只做闭环，不追求复杂。
 - LeadLoop 保证系统能连续工作。
 
-Subagent、Go、Event、前端是主链稳定之后的展示层。前端仍然是左 Project / Thread、中 Messages、右 Run Activity，让人看见 Agent 在做什么。
+Subagent、Go、Event、CLI 是主链稳定之后的展示层。CLI 让人看见 Agent 在做什么。
 
 一个抽象如果只有一个实现，而且不解决当前主线，就不创建。不提前做 `ProviderFactory`、`ToolRegistry`、`AgentRegistry`、`SkillRegistry`、`MemoryBackend`、`SandboxProvider`、`EventBus`、`PluginManager`、`ExtensionManager`。
 
@@ -1119,9 +1128,9 @@ Demo 可以固定输入文件、固定任务和固定模型配置，也可以用
 工程问题按这个分类：
 
 - P0，立刻修：Context 污染 Checkpoint，Memory 进不了下一 Run，Verify 永远 PASS，Replan 不改变行为，Subagent 没有独立执行，Artifact 没有落盘。
-- P1，尽快修：SSE 丢掉关键事件，UI 看不见 Replan，产物打不开，Run 状态错乱。
-- P2，记下但不做：复杂重试、高可用、精细权限、分布式一致性、高并发、完整故障恢复、复杂幂等。
+- P1，尽快修：SSE 丢掉关键事件，CLI 看不见 Replan，产物打不开，Run 状态错乱。
+- P2，记下但不做：复杂重试、高可用、精细权限、分布式一致性、高并发、生产级故障恢复、复杂幂等。
 
-某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束。最终演示能走完第 3 章的主线，包括下一次 Run 看见 Memory，以及页面跟上全过程，项目就成功。其后的完善是可选项。
+某一阶段已经同时满足「真实运行、真实影响下一步、演示里看得见」，该阶段就结束，然后进入下一阶段。最终演示能走完第 3 章的主线，包括下一次 Run 看见 Memory、一次中断后的恢复，以及 CLI 跟上全过程，项目就成功。其后的完善是可选项。
 
 实现时只问：为了证明 Long-Horizon Agent Runtime，现在还缺哪一跳。不问 DeerFlow 还有什么没搬过来。
