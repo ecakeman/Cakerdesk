@@ -4,12 +4,14 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"cakerdesk/internal/db"
 	"cakerdesk/internal/pythonclient"
 )
 
 type Server struct {
+	Pool      *pgxpool.Pool
 	Q         *db.Queries
 	Python    pythonclient.Client
 	Workspace string

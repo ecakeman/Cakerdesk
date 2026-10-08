@@ -52,6 +52,7 @@ func testServer(t *testing.T, python http.Handler) *httptest.Server {
 	py := httptest.NewServer(python)
 	t.Cleanup(py.Close)
 	srv := &Server{
+		Pool:      pool,
 		Q:         db.New(pool),
 		Python:    pythonclient.Client{BaseURL: py.URL},
 		Workspace: t.TempDir(),
@@ -164,8 +165,14 @@ func TestRunAcceptsBeforePythonFinishesAndStoresEvents(t *testing.T) {
 	if err := cli.Execute([]string{"run", "show", "--run", runID}, cli.Options{BaseURL: api.URL, Out: &shown}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(shown.String(), `"status": "completed"`) && !strings.Contains(shown.String(), `"status":"completed"`) {
+	if !strings.Contains(shown.String(), "status: completed") {
 		t.Fatalf("cli show %#v", shown.String())
+	}
+	if !strings.Contains(shown.String(), "未通过") || !strings.Contains(shown.String(), "结论") {
+		t.Fatalf("cli show verification %#v", shown.String())
+	}
+	if strings.Contains(shown.String(), `"type"`) {
+		t.Fatalf("cli show still raw json %#v", shown.String())
 	}
 }
 

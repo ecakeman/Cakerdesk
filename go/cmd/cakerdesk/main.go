@@ -52,6 +52,7 @@ func serve() error {
 	}
 	defer pool.Close()
 	srv := &server.Server{
+		Pool:      pool,
 		Q:         db.New(pool),
 		Python:    pythonclient.Client{BaseURL: env("CAKERDESK_PYTHON_URL", "http://127.0.0.1:8090")},
 		Workspace: env("CAKERDESK_WORKSPACE", filepath.Join("..", "workspace")),

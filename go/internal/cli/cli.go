@@ -90,7 +90,7 @@ func run(args []string, opt Options) error {
 		}
 		return post(opt, "/api/threads/"+threadID+"/runs?project_id="+projectID, map[string]string{"goal": goal})
 	case "show":
-		return get(opt, "/api/runs/"+need(args[1:], "--run"))
+		return showRun(opt, need(args[1:], "--run"))
 	case "resume":
 		return post(opt, "/api/runs/"+need(args[1:], "--run")+"/resume", map[string]string{})
 	case "cancel":
@@ -130,13 +130,41 @@ func watch(opt Options, runID string) error {
 		return fmt.Errorf("watch %d %s", response.StatusCode, raw)
 	}
 	scanner := bufio.NewScanner(response.Body)
+	var steps []stepView
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			fmt.Fprintln(opt.Out, strings.TrimPrefix(line, "data: "))
+		if !strings.HasPrefix(line, "data: ") {
+			continue
 		}
+		var event struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			return err
+		}
+		text, next := projectLine(steps, event.Type, event.Payload)
+		steps = next
+		fmt.Fprintln(opt.Out, text)
 	}
 	return scanner.Err()
+}
+
+func showRun(opt Options, runID string) error {
+	if runID == "" {
+		return fmt.Errorf("run show --run")
+	}
+	response, err := http.Get(strings.TrimRight(opt.BaseURL, "/") + "/api/runs/" + runID)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	raw, _ := io.ReadAll(response.Body)
+	fmt.Fprintln(opt.Out, formatShow(raw))
+	if response.StatusCode >= 300 {
+		return fmt.Errorf("http %d", response.StatusCode)
+	}
+	return nil
 }
 
 func get(opt Options, path string) error {

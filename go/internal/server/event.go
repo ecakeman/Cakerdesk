@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -38,11 +39,18 @@ func (s *Server) ingest(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	if _, err := s.Q.GetRun(ctx, body.RunID); err != nil {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback(ctx)
+	q := s.Q.WithTx(tx)
+	if _, err := q.GetRun(ctx, body.RunID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	inserted, err := s.Q.InsertEvent(ctx, db.InsertEventParams{
+	inserted, err := q.InsertEvent(ctx, db.InsertEventParams{
 		RunID: body.RunID, Seq: body.Seq, Type: body.Type, Timestamp: body.Timestamp, Payload: string(body.Payload),
 	})
 	if err != nil {
@@ -51,29 +59,37 @@ func (s *Server) ingest(c *gin.Context) {
 	}
 	event := db.Event{RunID: body.RunID, Seq: body.Seq, Type: body.Type, Timestamp: body.Timestamp, Payload: string(body.Payload)}
 	if inserted > 0 {
-		if err := s.applySnapshot(c, event); err != nil {
+		if err := applySnapshot(ctx, q, event); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		if err := projectMessage(ctx, q, event); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if inserted > 0 {
 		s.publish(event)
-		s.projectMessage(c, event)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "inserted": inserted > 0})
 }
 
-func (s *Server) applySnapshot(c *gin.Context, event db.Event) error {
-	ctx := c.Request.Context()
+func applySnapshot(ctx context.Context, q *db.Queries, event db.Event) error {
 	switch event.Type {
 	case "plan.updated":
-		return s.Q.UpdatePlanSnapshot(ctx, db.UpdatePlanSnapshotParams{ID: event.RunID, PlanSnapshot: event.Payload})
+		return q.UpdatePlanSnapshot(ctx, db.UpdatePlanSnapshotParams{ID: event.RunID, PlanSnapshot: event.Payload})
 	case "verification.completed":
-		return s.Q.UpdateVerificationSnapshot(ctx, db.UpdateVerificationSnapshotParams{ID: event.RunID, VerificationSnapshot: event.Payload})
+		return q.UpdateVerificationSnapshot(ctx, db.UpdateVerificationSnapshotParams{ID: event.RunID, VerificationSnapshot: event.Payload})
 	case "run.completed":
-		return s.Q.CompleteRun(ctx, db.CompleteRunParams{ID: event.RunID, ArtifactPaths: artifactPaths(event.Payload)})
+		return q.CompleteRun(ctx, db.CompleteRunParams{ID: event.RunID, ArtifactPaths: artifactPaths(event.Payload)})
 	case "run.failed":
-		return s.Q.SetRunStatus(ctx, db.SetRunStatusParams{ID: event.RunID, Status: "failed"})
+		return q.SetRunStatus(ctx, db.SetRunStatusParams{ID: event.RunID, Status: "failed"})
 	case "run.cancelled":
-		return s.Q.SetRunStatus(ctx, db.SetRunStatusParams{ID: event.RunID, Status: "cancelled"})
+		return q.SetRunStatus(ctx, db.SetRunStatusParams{ID: event.RunID, Status: "cancelled"})
 	default:
 		return nil
 	}
@@ -90,10 +106,10 @@ func artifactPaths(payload string) string {
 	return string(raw)
 }
 
-func (s *Server) projectMessage(c *gin.Context, event db.Event) {
-	run, err := s.Q.GetRun(c.Request.Context(), event.RunID)
+func projectMessage(ctx context.Context, q *db.Queries, event db.Event) error {
+	run, err := q.GetRun(ctx, event.RunID)
 	if err != nil {
-		return
+		return err
 	}
 	switch event.Type {
 	case "model.message":
@@ -102,7 +118,7 @@ func (s *Server) projectMessage(c *gin.Context, event db.Event) {
 		}
 		_ = json.Unmarshal([]byte(event.Payload), &payload)
 		if payload.Content != "" {
-			_ = s.Q.AddMessage(c.Request.Context(), db.AddMessageParams{
+			return q.AddMessage(ctx, db.AddMessageParams{
 				ID: uuid.NewString(), ThreadID: run.ThreadID, Role: "assistant", Content: payload.Content, CreatedAt: now(),
 			})
 		}
@@ -113,10 +129,11 @@ func (s *Server) projectMessage(c *gin.Context, event db.Event) {
 			Summary string `json:"summary"`
 		}
 		_ = json.Unmarshal([]byte(event.Payload), &payload)
-		_ = s.Q.AddMessage(c.Request.Context(), db.AddMessageParams{
+		return q.AddMessage(ctx, db.AddMessageParams{
 			ID: uuid.NewString(), ThreadID: run.ThreadID, Role: "tool", Content: payload.Tool + " " + payload.Status + " " + payload.Summary, CreatedAt: now(),
 		})
 	}
+	return nil
 }
 
 func (s *Server) streamEvents(c *gin.Context) {

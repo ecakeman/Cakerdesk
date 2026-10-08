@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import sys
 import threading
 import urllib.request
 from pathlib import Path
@@ -331,6 +333,59 @@ def tempfile_token():
 
     while True:
         yield uuid.uuid4().hex[:8]
+
+
+@pytest.mark.skipif(not os.environ.get("CAKERDESK_DATABASE_URL"), reason="需要 CAKERDESK_DATABASE_URL，不退回 SQLite")
+def test_process_exit_then_resume(tmp_path: Path):
+    root = _workspace(tmp_path)
+    env = os.environ.copy()
+    env.update({
+        "WS": str(root),
+        "THREAD": "exit-" + next(tempfile_token()),
+        "RUN": "run-exit",
+        "PROJECT": "exit-" + next(tempfile_token()),
+    })
+    script = r"""
+import os
+from pathlib import Path
+from langchain_core.messages import HumanMessage
+from cakerdesk.events import EventSink
+from cakerdesk.graph import build_graph, execute_run, open_checkpointer
+from cakerdesk.memory import open_memory
+from tests.demo_model import DemoModel
+
+url = os.environ["CAKERDESK_DATABASE_URL"]
+root = Path(os.environ["WS"])
+graph = build_graph(open_checkpointer(url))
+common = dict(
+    project_id=os.environ["PROJECT"],
+    thread_id=os.environ["THREAD"],
+    run_id=os.environ["RUN"],
+    goal="根据 work/notes.txt 和 work/sales.csv，完成 artifacts/report.md。",
+    workspace_root=str(root),
+    model=DemoModel(),
+    memory=open_memory(url),
+    sink=EventSink(),
+    graph=graph,
+)
+if os.environ["PHASE"] == "start":
+    execute_run(interrupt_after=["ensure_plan"], **common)
+else:
+    execute_run(resume=True, **common)
+    assert "结论" in (root / "artifacts" / "report.md").read_text(encoding="utf-8")
+    snapshot = graph.get_state({"configurable": {"thread_id": os.environ["THREAD"]}})
+    humans = [message for message in snapshot.values["messages"] if isinstance(message, HumanMessage)]
+    assert len(humans) == 1
+    assert snapshot.values["plan"]["steps"][0]["title"] == "阅读 notes.txt"
+    assert snapshot.values.get("findings")
+"""
+    python_root = Path(__file__).resolve().parents[1]
+    env["PHASE"] = "start"
+    first = subprocess.run([sys.executable, "-c", script], cwd=python_root, env=env, check=False, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    env["PHASE"] = "resume"
+    second = subprocess.run([sys.executable, "-c", script], cwd=python_root, env=env, check=False, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
 
 
 def test_start_returns_202_before_run_finishes(tmp_path: Path):
